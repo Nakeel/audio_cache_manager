@@ -6,50 +6,57 @@ import '../utils/aes_encryptor.dart';
 import 'package:path_provider/path_provider.dart';
 
 class HlsCacheHandler {
-  HttpServer? _server;
+  Future<File?> download(String url, {bool encrypt = false, required String encryptionKey, required String trackId}) async {
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode != 200) return null;
 
-  Future<void> startServer() async {
-    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 8000);
-    _server?.listen((HttpRequest request) async {
-      final urlParam = Uri.decodeFull(request.uri.queryParameters['url'] ?? '');
-      if (urlParam.isEmpty) {
-        request.response.statusCode = HttpStatus.badRequest;
-        await request.response.close();
-        return;
+      final m3u8Content = utf8.decode(response.bodyBytes);
+      final segments = _parseM3u8Segments(m3u8Content, url);
+      final dir = await getTemporaryDirectory();
+      final trackDir = Directory('${dir.path}/audio_cache/hls_$trackId');
+      await trackDir.create(recursive: true);
+
+      for (final segment in segments) {
+        final segmentUrl = _resolveSegmentUrl(segment, url);
+        final segmentResponse = await http.get(Uri.parse(segmentUrl));
+        if (segmentResponse.statusCode == 200) {
+          final segmentFile = File('${trackDir.path}/${segment.hashCode}.ts');
+          if (encrypt) {
+            final aes = AESHelper(encryptionKey);
+            final encrypted = aes.encryptData(segmentResponse.bodyBytes);
+            await segmentFile.writeAsBytes(encrypted);
+          } else {
+            await segmentFile.writeAsBytes(segmentResponse.bodyBytes);
+          }
+        }
       }
 
-      final proxyResponse = await http.get(Uri.parse(urlParam));
-      request.response.statusCode = proxyResponse.statusCode;
-      request.response.headers.contentType = ContentType("application", "vnd.apple.mpegurl");
-      request.response.add(proxyResponse.bodyBytes);
-      await request.response.close();
-    });
-  }
+      final localM3u8 = File('${trackDir.path}/playlist.m3u8');
+      await localM3u8.writeAsString(m3u8Content.replaceAllMapped(
+          RegExp(r'^(https?://.*\.ts)$', multiLine: true),
+              (match) => '${trackDir.path}/${match[0]!.hashCode}.ts'));
 
-  Future<File?> download(String url, {bool encrypt = false}) async {
-    final uri = Uri.parse(url);
-    final response = await http.get(uri);
-    if (response.statusCode != 200) return null;
-
-    final dir = await getTemporaryDirectory();
-    final filePath = '\${dir.path}/\${md5.convert(utf8.encode(url))}.m3u8';
-    final file = File(filePath);
-
-    if (encrypt) {
-      final encrypted = AESHelper.encryptData(response.bodyBytes);
-      await file.writeAsBytes(encrypted);
-    } else {
-      await file.writeAsBytes(response.bodyBytes);
+      return localM3u8;
+    } catch (e) {
+      print('Error downloading HLS track: $e');
+      return null;
     }
-
-    return file;
   }
 
-  String getProxiedUrl(String originalUrl) {
-    return 'http://127.0.0.1:8000/?url=\${Uri.encodeComponent(originalUrl)}';
+  List<String> _parseM3u8Segments(String m3u8Content, String baseUrl) {
+    final segments = <String>[];
+    final lines = m3u8Content.split('\n');
+    for (final line in lines) {
+      if (line.trim().endsWith('.ts')) {
+        segments.add(line.trim());
+      }
+    }
+    return segments;
   }
 
-  Future<void> stopServer() async {
-    await _server?.close();
+  String _resolveSegmentUrl(String segment, String baseUrl) {
+    if (segment.startsWith('http')) return segment;
+    return Uri.parse(baseUrl).resolve(segment).toString();
   }
 }

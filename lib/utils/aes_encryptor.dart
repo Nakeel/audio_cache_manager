@@ -1,22 +1,24 @@
 import 'dart:typed_data' show Uint8List;
-
 import 'package:encrypt/encrypt.dart' as encrypt;
 
 class AESHelper {
-  static final _key = encrypt.Key.fromLength(32);
-  static final _iv = encrypt.IV.fromLength(16);
-  static final _encrypter = encrypt.Encrypter(encrypt.AES(_key));
+  final encrypt.Key _key;
+  final encrypt.IV _iv;
 
-  static List<int> encryptData(List<int> data) {
-    final encrypted = _encrypter.encryptBytes(data, iv: _iv);
-    return encrypted.bytes;
+  AESHelper(String key)
+      : _key = encrypt.Key.fromUtf8(key.padRight(32, '\0')),
+        _iv = encrypt.IV.fromLength(16);
+
+  List<int> encryptData(List<int> data) {
+    final encrypter = encrypt.Encrypter(encrypt.AES(_key));
+    final encrypted = encrypter.encryptBytes(data, iv: _iv);
+    return [..._iv.bytes, ...encrypted.bytes];
   }
 
-  static List<int> decryptData(List<int> data) {
-    final decrypted = _encrypter.decryptBytes(
-      encrypt.Encrypted(Uint8List.fromList(data)),
-      iv: _iv,
-    );
-    return decrypted;
+  List<int> decryptData(List<int> data) {
+    final iv = encrypt.IV(Uint8List.fromList(data.sublist(0, 16)));
+    final encryptedData = data.sublist(16);
+    final encrypter = encrypt.Encrypter(encrypt.AES(_key));
+    return encrypter.decryptBytes(encrypt.Encrypted(Uint8List.fromList(encryptedData)), iv: iv);
   }
 }
