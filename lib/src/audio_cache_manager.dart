@@ -74,7 +74,7 @@ class AudioCacheManager {
           cachedFiles.add(file);
           onProgress?.call(i + 1, trackUrls.length);
         }).catchError((e) {
-          log('Error caching track $trackId: $e'); // Updated to use AppLogger
+          print('Error caching track $trackId: $e'); // Updated to use AppLogger
           cachedFiles.add(null);
         }));
       }
