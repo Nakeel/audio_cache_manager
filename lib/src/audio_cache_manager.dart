@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:nativewrappers/_internal/vm/lib/developer.dart';
 import 'package:path_provider/path_provider.dart';
 import '../handlers/hls_cache_handler.dart';
 import '../handlers/mp3_cache_handler.dart';
@@ -14,8 +15,8 @@ class CacheException implements Exception {
 }
 
 class AudioCacheManager {
-  static final AudioCacheManager _instance = AudioCacheManager._internal();
-  factory AudioCacheManager() => _instance;
+  static final AudioCacheManager _instance = AudioCacheManager();
+  // factory AudioCacheManager() => _instance;
 
   final Duration expirationDuration;
   final bool enableEncryption;
@@ -26,20 +27,23 @@ class AudioCacheManager {
   final Mp3CacheHandler _mp3Handler;
   final HlsCacheHandler _hlsHandler;
   final CacheMetadataStore _metadataStore;
+  bool _isInitialized = false; // Track initialization state
 
-  AudioCacheManager._internal({
+  AudioCacheManager({
     this.expirationDuration = const Duration(days: 30),
     this.enableEncryption = false,
     this.maxCacheSize = 2 * 1024 * 1024 * 1024, // 2GB
     this.isUserSubscribed = false,
-    this.encryptionKey = 'your-32-byte-secure-key-here-1234', // Replace with secure source
+    this.encryptionKey = 'your-32-byte-secure-key-here-1234',
   })  : _metadataStore = CacheMetadataStore(),
         _mp3Handler = Mp3CacheHandler(),
         _hlsHandler = HlsCacheHandler();
 
   Future<void> init() async {
+    if (_isInitialized) return; // Prevent reinitialization
     await _metadataStore.init();
     await _cleanupExpiredCache();
+    _isInitialized = true;
   }
 
   /// Caches a playlist of audio tracks for offline playback.
@@ -51,6 +55,7 @@ class AudioCacheManager {
       String playlistId, {
         Function(int completed, int total)? onProgress,
       }) async {
+    if (!_isInitialized) await init(); // Ensure initialized
     final cachedFiles = <File?>[];
     try {
       final futures = <Future>[];
@@ -69,7 +74,7 @@ class AudioCacheManager {
           cachedFiles.add(file);
           onProgress?.call(i + 1, trackUrls.length);
         }).catchError((e) {
-          print('Error caching track $trackId: $e');
+          log('Error caching track $trackId: $e'); // Updated to use AppLogger
           cachedFiles.add(null);
         }));
       }
@@ -86,6 +91,7 @@ class AudioCacheManager {
   /// [isHls] Whether the file is an HLS stream.
   /// [trackId] Optional unique identifier for the track.
   Future<File?> getAudioFile(String url, {bool isHls = false, String? trackId}) async {
+    if (!_isInitialized) await init(); // Ensure initialized
     try {
       final now = DateTime.now();
       final entry = await _metadataStore.get(url);
@@ -208,6 +214,14 @@ class AudioCacheManager {
       }
     } catch (e) {
       throw CacheException('Failed to clear cache: $e');
+    }
+  }
+
+  /// Disposes the cache manager, closing the metadata store.
+  Future<void> dispose() async {
+    if (_isInitialized) {
+      await _metadataStore.dispose();
+      _isInitialized = false;
     }
   }
 }
