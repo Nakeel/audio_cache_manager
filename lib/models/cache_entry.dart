@@ -6,7 +6,7 @@ import 'package:hive/hive.dart';
 // to generate the updated `cache_entry.g.dart` file.
 part 'cache_entry.g.dart';
 
-@HiveType(typeId: 0) // Unique typeId for Hive
+@HiveType(typeId: 178) // Unique typeId for Hive
 class CacheEntry extends HiveObject {
   @HiveField(0)
   final String trackId; // New: Unique identifier for the audio track (will be Hive key)
