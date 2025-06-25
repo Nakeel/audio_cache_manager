@@ -104,13 +104,52 @@ class AudioCacheManager {
     print('AudioCacheManager initialized and ready.');
   }
 
-  /// Downloads and caches an audio file (MP3 or HLS).
-  /// Returns the trackId if successful, null otherwise.
+  /// Determines if a given URL is likely an HLS manifest.
+  /// This check is more robust than just `endsWith('.m3u8')`.
+  bool _determineIsHls(String url) {
+    try {
+      final uri = Uri.parse(url);
+      final path = uri.path;
+      final query = uri.query;
+
+      // Check common HLS manifest extensions in the path
+      if (path.endsWith('.m3u8') || path.endsWith('.m3u')) {
+        return true;
+      }
+      // Check if the path contains known HLS manifest filenames
+      if (path.contains('/master.m3u8') || path.contains('/playlist.m3u8') ||
+          path.contains('/index.m3u8') || path.contains('/variant.m3u8')) {
+        return true;
+      }
+      // Check for .m3u8 within query parameters as well, sometimes URLs are like baseurl?file=xyz.m3u8
+      if (query.contains('.m3u8') || query.contains('.m3u')) {
+        return true;
+      }
+
+      // If the URL contains an HLS specific identifier (like /hls/ or /live/)
+      // and ends with a common video/audio extension, it might be an HLS source
+      // where the manifest name is implied or generated.
+      // This is a heuristic, be careful with it.
+      if ((path.contains('/hls/') || path.contains('/live/')) &&
+          (path.endsWith('.mp4') || path.endsWith('.m4a') || path.endsWith('.aac') || path.endsWith('.ts'))) {
+        // Example: https://example.com/hls/audio.m4a (where m4a is actually a manifest endpoint)
+        // This is less common but can occur with some CDN setups.
+        // If this leads to false positives, remove this part.
+        return true;
+      }
+
+    } catch (e) {
+      print('Error parsing URL for HLS detection: $url, error: $e');
+      // If URL parsing fails, default to false
+    }
+    return false;
+  }
+
   Future<String?> cacheAudio(
       String originalUrl,
       String trackId, {
         Function(int received, int total)? onProgress,
-        bool isHls = false,
+        // bool isHls = false, // <-- This parameter is now removed
       }) async {
     // Ensure manager is initialized before any operation
     if (!_isInitialized) {
@@ -121,6 +160,8 @@ class AudioCacheManager {
     try {
       // Check if already cached and still valid
       final existingEntry = await _metadataStore.get(trackId);
+      final bool currentIsHls = _determineIsHls(originalUrl); // Determine HLS status here
+
       if (existingEntry != null &&
           await (existingEntry.isHls ? Directory(existingEntry.localPath).exists() : File(existingEntry.localPath).exists()) &&
           DateTime.now().difference(existingEntry.cachedAt) < expirationDuration) {
@@ -131,13 +172,12 @@ class AudioCacheManager {
         return trackId;
       }
 
-      final bool shouldEncrypt = isUserSubscribed; // Encrypt if user is subscribed
+      final bool shouldEncrypt = isUserSubscribed;
 
       String? finalLocalPath;
       int fileSize = 0;
 
-      if (isHls) {
-        // Handle HLS download and manifest rewriting
+      if (currentIsHls) { // Use the determined HLS status
         final result = await _downloadHls(originalUrl, trackId, shouldEncrypt, onProgress);
         if (result != null) {
           finalLocalPath = result['localPath'];
@@ -161,8 +201,7 @@ class AudioCacheManager {
           lastAccessedAt: DateTime.now(), // Set initial last accessed
           fileSize: fileSize,
           isEncrypted: shouldEncrypt,
-          isHls: isHls,
-          // Add optional title/artist here if available
+          isHls: currentIsHls, // Store the determined HLS status
         );
         await _metadataStore.save(newEntry); // Save with trackId as key
         print('Cached audio $trackId: ${newEntry.url} to ${newEntry.localPath}, Encrypted: $shouldEncrypt, Size: $fileSize bytes.');
@@ -171,29 +210,42 @@ class AudioCacheManager {
       return null;
     } catch (e) {
       print('Error in cacheAudio for $trackId: $e');
-      // TODO: Log specific errors and perform cleanup of partial downloads
-      await _cleanupPartialDownload(trackId, isHls);
+      final bool determinedIsHlsForCleanup = _determineIsHls(originalUrl); // Re-determine for cleanup
+      await _cleanupPartialDownload(trackId, determinedIsHlsForCleanup);
       return null;
     } finally {
       await _cleanupCache(); // Enforce limits after each caching operation
     }
   }
 
-  /// Helper to clean up a partial download if an error occurs.
-  Future<void> _cleanupPartialDownload(String trackId, bool isHls) async {
-    final entry = await _metadataStore.get(trackId); // Get by trackId
+  Future<void> _cleanupPartialDownload(String trackId, bool isHlsDuringDownload) async {
+    final entry = await _metadataStore.get(trackId);
     if (entry != null) {
-      if (isHls) {
-        final dir = Directory(entry.localPath);
-        if (await dir.exists()) await dir.delete(recursive: true);
+      // Use the 'isHls' from the CacheEntry if available, otherwise fallback to the
+      // 'isHlsDuringDownload' which was passed to the cacheAudio function for this specific call.
+      // This fallback is crucial if the entry itself wasn't successfully saved to Hive.
+      final bool typeForCleanup = entry.isHls ?? isHlsDuringDownload;
+
+      final FileSystemEntity fileOrDir;
+      if (typeForCleanup) {
+        fileOrDir = Directory(entry.localPath);
       } else {
-        final file = File(entry.localPath);
-        if (await file.exists()) await file.delete();
+        fileOrDir = File(entry.localPath);
       }
-      await _metadataStore.delete(trackId); // Delete by trackId
-      print('Cleaned up partial download for $trackId');
+
+      if (await fileOrDir.exists()) {
+        try {
+          await fileOrDir.delete(recursive: true);
+          print('Cleaned up files for ${entry.trackId} from disk.');
+        } catch (e) {
+          print('Error deleting files for ${entry.trackId} during cleanup: $e');
+        }
+      }
+      await _metadataStore.delete(trackId);
+      print('Cleaned up metadata for ${entry.trackId} from Hive during cleanup.');
     }
   }
+
 
   /// Downloads and saves an MP3 file.
   Future<Map<String, dynamic>?> _downloadMp3(

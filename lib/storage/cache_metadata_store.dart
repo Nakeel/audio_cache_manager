@@ -7,11 +7,12 @@ class CacheMetadataStore {
 
   Future<void> init() async {
     // Hive.initFlutter() and Hive.registerAdapter() should be called ONCE in main()
-    if (!Hive.isAdapterRegistered(0)) { // 0 is the typeId for CacheEntry
+    if (!Hive.isAdapterRegistered(178)) { // 0 is the typeId for CacheEntry
       Hive.registerAdapter(CacheEntryAdapter());
     }
 
     _box = await Hive.openBox<CacheEntry>('audio_cache_metadata');
+    print('CacheMetadataStore: Cleared old data for refactoring.');
     print('CacheMetadataStore initialized.');
   }
 
