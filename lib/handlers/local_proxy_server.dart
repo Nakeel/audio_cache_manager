@@ -49,12 +49,18 @@ class LocalProxyServer {
   /// Generates a proxy URL for an HLS playlist (rewritten master/sub-manifest).
   /// Now takes manifestFileName to specify which HLS manifest to serve from the track's directory.
   String getHlsPlaylistProxyUrl(String trackId, String manifestFileName) {
-    return 'http://127.0.0.1:$_port/hls/$trackId/$manifestFileName';
+    // THIS IS THE CORRECTED PART:
+    // The proxy URL should only point to the local file, not include original CDN tokens/wildcards.
+    return 'http://127.0.0.1:$_port/hls_manifests/$trackId/$manifestFileName';
+    // Changed path segment to hls_manifests to differentiate from segment requests if needed.
+    // Or keep 'hls' but ensure the regex correctly handles it.
   }
 
   /// Generates a proxy URL for an HLS segment or other HLS-related file.
   String getHlsSegmentProxyUrl(String trackId, String segmentFileName) {
-    return 'http://127.0.0.1:$_port/hls/$trackId/$segmentFileName';
+    // Same logic: should not contain original URL's tokens
+    return 'http://127.0.0.1:$_port/hls_segments/$trackId/$segmentFileName';
+    // Changed path segment to hls_segments
   }
 
   /// Generates a proxy URL for an encrypted MP3 file.
@@ -69,53 +75,69 @@ class LocalProxyServer {
     final String path = request.url.path;
     print('Proxy Request: ${request.method} ${request.url}');
 
-    // Example path: hls/{trackId}/{filename.m3u8} or hls/{trackId}/{segment.ts}
-    final hlsMatch = RegExp(r'^hls/([^/]+)/(.+)$').firstMatch(path);
-    if (hlsMatch != null) {
-      final trackId = hlsMatch.group(1)!;
-      final fileName = hlsMatch.group(2)!; // This could be master.m3u8, sub.m3u8, or segment.ts
+    final hlsManifestMatch = RegExp(r'^hls_manifests/([^/]+)/(.+)$').firstMatch(path);
+    if (hlsManifestMatch != null) {
+      final trackId = hlsManifestMatch.group(1)!;
+      final fileName = hlsManifestMatch.group(2)!; // This should be 'master.m3u8' or 'proxy_playlist.m3u8'
 
       final CacheEntry? entry = await _getCacheEntry(trackId);
       if (entry == null || !entry.isHls) {
-        print('Proxy: HLS track metadata not found or not HLS for $trackId');
+        print('Proxy: HLS manifest metadata not found or not HLS for $trackId');
         return Response.notFound('HLS track metadata not found or not HLS: $trackId');
       }
 
-      // Reconstruct the full local file path from the CacheEntry's localPath (which is the track's dir)
-      // and the requested fileName (manifest or segment).
-      final String fullLocalPath = p.join(entry.localPath, fileName);
+      final String fullLocalPath = p.join(entry.localPath, fileName); // entry.localPath is the track's directory
       final File file = File(fullLocalPath);
 
       if (!await file.exists()) {
-        print('Proxy: HLS file not found in cache: $fullLocalPath');
-        return Response.notFound('HLS file not found in cache: $fullLocalPath');
+        print('Proxy: HLS manifest file not found in cache: $fullLocalPath');
+        return Response.notFound('HLS manifest file not found in cache: $fullLocalPath');
       }
 
-      // Serve the file, decrypting if necessary
       return await _serveFile(file, entry.isEncrypted);
     }
 
-    // Example path: mp3/{trackId}
+    // Example path: hls_segments/{trackId}/{segmentFileName.ts}
+    final hlsSegmentMatch = RegExp(r'^hls_segments/([^/]+)/(.+)$').firstMatch(path);
+    if (hlsSegmentMatch != null) {
+      final trackId = hlsSegmentMatch.group(1)!;
+      final fileName = hlsSegmentMatch.group(2)!; // This should be 'segment0001.ts' etc.
+
+      final CacheEntry? entry = await _getCacheEntry(trackId);
+      if (entry == null || !entry.isHls) {
+        print('Proxy: HLS segment metadata not found or not HLS for $trackId');
+        return Response.notFound('HLS track metadata not found or not HLS: $trackId');
+      }
+
+      final String fullLocalPath = p.join(entry.localPath, fileName); // entry.localPath is the track's directory
+      final File file = File(fullLocalPath);
+
+      if (!await file.exists()) {
+        print('Proxy: HLS segment file not found in cache: $fullLocalPath');
+        return Response.notFound('HLS segment file not found in cache: $fullLocalPath');
+      }
+
+      return await _serveFile(file, entry.isEncrypted);
+    }
+
+    // Example path: mp3/{trackId} (No change needed here, it was already fine)
     final mp3Match = RegExp(r'^mp3/([^/]+)$').firstMatch(path);
     if (mp3Match != null) {
       final trackId = mp3Match.group(1)!;
 
       final CacheEntry? entry = await _getCacheEntry(trackId);
-      // For MP3s served via proxy, they *must* be encrypted.
-      // If not encrypted, they would be served directly by just_audio.
       if (entry == null || entry.isHls || !entry.isEncrypted) {
         print('Proxy: MP3 track metadata not found or not encrypted: $trackId');
         return Response.notFound('MP3 track metadata not found or not encrypted: $trackId');
       }
 
-      final File file = File(entry.localPath); // For MP3, entry.localPath is the full file path (e.g., .mp3.enc)
+      final File file = File(entry.localPath);
       if (!await file.exists()) {
         print('Proxy: MP3 file not found in cache: ${entry.localPath}');
         return Response.notFound('MP3 file not found in cache: ${entry.localPath}');
       }
 
-      // Serve the file, decrypting (always for this path based on logic)
-      return await _serveFile(file, true); // It's served via /mp3, so it must be encrypted
+      return await _serveFile(file, true);
     }
 
     return Response.notFound('Invalid cached content request: ${request.url}');

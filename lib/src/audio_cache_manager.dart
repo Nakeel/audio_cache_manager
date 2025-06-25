@@ -279,6 +279,7 @@ class AudioCacheManager {
   }
 
   /// Downloads HLS manifest and segments, rewriting the manifest.
+  /// This method is crucial for how HLS content is cached and prepared for local proxy serving.
   Future<Map<String, dynamic>?> _downloadHls(
       String m3u8Url,
       String trackId,
@@ -289,7 +290,7 @@ class AudioCacheManager {
     final Directory trackDir = Directory(trackCacheDirPath);
 
     if (await trackDir.exists()) {
-      await trackDir.delete(recursive: true); // Clean up any existing content
+      await trackDir.delete(recursive: true);
     }
     await trackDir.create(recursive: true);
     print('Created HLS cache directory: ${trackDir.path}');
@@ -300,29 +301,30 @@ class AudioCacheManager {
       options: Options(responseType: ResponseType.plain),
     );
     final String masterM3u8Content = manifestResponse.data!;
-    final String masterM3u8FileName = p.basename(m3u8Url);
+    final String masterM3u8FileName = p.basename(Uri.parse(m3u8Url).path); // Get clean filename from URL path
     final File localMasterM3u8File = File(p.join(trackDir.path, masterM3u8FileName));
     await localMasterM3u8File.writeAsString(masterM3u8Content);
     print('HLS master manifest downloaded: ${localMasterM3u8File.path}');
 
     // 2. Parse Manifests and Collect All Segment/Sub-playlist URLs
-    Set<String> allMediaUrlsToDownload = {}; // Use Set to avoid duplicates
+    // Use a Queue to handle recursive parsing of nested M3U8s
+    Set<String> allMediaUrlsToDownload = {};
     Queue<String> manifestsToParse = Queue();
     manifestsToParse.add(m3u8Url); // Start with the master manifest URL
 
-    // Keep track of downloaded manifests to avoid infinite loops with circular references
-    Set<String> downloadedManifests = {};
+    Set<String> processedManifestUrls = {}; // Keep track of processed manifest URLs to avoid cycles/re-downloading
+
+    // Aggregate initial total bytes for progress calculation (approximate)
+    int totalBytesToDownload = 0;
 
     while (manifestsToParse.isNotEmpty) {
       final currentManifestUrl = manifestsToParse.removeFirst();
-      if (downloadedManifests.contains(currentManifestUrl)) {
-        continue; // Already processed this manifest
+      if (processedManifestUrls.contains(currentManifestUrl)) {
+        continue;
       }
-      downloadedManifests.add(currentManifestUrl);
+      processedManifestUrls.add(currentManifestUrl);
 
       String currentManifestContent;
-      // If it's the master manifest, use the already downloaded content.
-      // Otherwise, fetch sub-manifest.
       if (currentManifestUrl == m3u8Url) {
         currentManifestContent = masterM3u8Content;
       } else {
@@ -332,14 +334,13 @@ class AudioCacheManager {
             options: Options(responseType: ResponseType.plain),
           );
           currentManifestContent = subManifestResponse.data!;
-          // Save sub-manifest locally for proxy to serve (unmodified)
-          final subM3u8FileName = p.basename(currentManifestUrl);
+          final subM3u8FileName = p.basename(Uri.parse(currentManifestUrl).path);
           final File localSubM3u8File = File(p.join(trackDir.path, subM3u8FileName));
           await localSubM3u8File.writeAsString(currentManifestContent);
           print('Downloaded sub-manifest: ${localSubM3u8File.path}');
         } on DioException catch (e) {
           print('Error downloading sub-manifest $currentManifestUrl: ${e.message}');
-          continue; // Skip this manifest if download fails
+          continue;
         }
       }
 
@@ -350,11 +351,9 @@ class AudioCacheManager {
         final trimmedLine = line.trim();
         if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
           final resolvedUrl = baseUri.resolve(trimmedLine).toString();
-          if (resolvedUrl.endsWith('.m3u8') && !downloadedManifests.contains(resolvedUrl)) {
-            // Found a new sub-playlist, add to queue for parsing
+          if (resolvedUrl.endsWith('.m3u8') && !processedManifestUrls.contains(resolvedUrl)) {
             manifestsToParse.add(resolvedUrl);
           } else if (resolvedUrl.endsWith('.ts') || resolvedUrl.contains('.mp4') || resolvedUrl.contains('.aac')) {
-            // Found a media segment
             allMediaUrlsToDownload.add(resolvedUrl);
           }
         }
@@ -369,16 +368,13 @@ class AudioCacheManager {
 
     for (final mediaUrl in allMediaUrlsToDownload) {
       downloadFutures.add(() async {
-        final String mediaFileName = p.basename(mediaUrl);
+        final String mediaFileName = p.basename(Uri.parse(mediaUrl).path); // Get clean filename from URL path
         final String localMediaPath = p.join(trackDir.path, mediaFileName);
 
         try {
           final Response<Uint8List> mediaResponse = await _dio.get<Uint8List>(
             mediaUrl,
             options: Options(responseType: ResponseType.bytes),
-            onReceiveProgress: (received, total) {
-              // This progress is per-segment. Aggregate it if you need overall progress.
-            },
           );
 
           if (mediaResponse.statusCode == 200 && mediaResponse.data != null) {
@@ -401,14 +397,13 @@ class AudioCacheManager {
         } catch (e) {
           print('Error downloading media $mediaUrl: $e');
         }
-      }()); // Immediately call the async function
+      }());
     }
     await Future.wait(downloadFutures);
     print('All HLS media segments downloaded and processed for track $trackId.');
 
-    // 4. Rewrite Master M3U8 and all Sub-M3U8s to point to Local Proxy Server
-    // This is crucial for just_audio to request content from our proxy.
-    // We iterate through all manifests we downloaded and rewrite them.
+    // 4. Rewrite All Local M3U8 Manifests to point to Local Proxy Server
+    // Iterate through all manifest files saved locally in this track's directory
     final List<File> localManifestFiles = trackDir.listSync(recursive: false)
         .whereType<File>()
         .where((file) => file.path.endsWith('.m3u8'))
@@ -417,23 +412,32 @@ class AudioCacheManager {
     for (final localManifestFile in localManifestFiles) {
       String currentManifestContent = await localManifestFile.readAsString();
 
-      // We need to resolve URLs relative to the original source manifest URL,
-      // not the local file system path, for accurate replacement.
-      // This is complex. For simplicity, let's assume we replace based on actual downloaded URLs.
-      // A more robust solution might involve parsing the manifest tree fully.
-
+      // Iterate through lines to find and replace URLs with proxy URLs
       currentManifestContent = currentManifestContent.split('\n').map((line) {
         final trimmedLine = line.trim();
         if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
-          // Attempt to find a media file or sub-playlist name in the line
-          final fileNameMatch = RegExp(r'(.*)\.(?:ts|m3u8|mp4|aac)(\?.*)?$').firstMatch(trimmedLine);
-          if (fileNameMatch != null) {
-            final fileName = p.basename(trimmedLine.split('?')[0]); // Get filename without query params
-            if (trimmedLine.endsWith('.m3u8')) {
-              // This is a sub-playlist. It should also be proxied.
+          // This regex aims to match common HLS media segment and sub-playlist URLs.
+          // It handles URLs that might have query parameters.
+          final urlMatch = RegExp(r'^(https?://.*?\.(?:ts|m3u8|mp4|aac)(\?.*)?)$').firstMatch(trimmedLine);
+
+          if (urlMatch != null) {
+            final String originalMatchedUrl = urlMatch.group(0)!; // The entire matched URL
+            final String fileName = p.basename(Uri.parse(originalMatchedUrl).path); // Clean filename from the matched URL
+
+            if (originalMatchedUrl.endsWith('.m3u8')) {
+              // This is a sub-playlist or the master playlist reference
               return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
             } else {
-              // This is a media segment.
+              // This is a media segment
+              return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
+            }
+          }
+          // If the line is a relative path (e.g., 'segment0001.ts' or 'low.m3u8')
+          else if (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.m3u8') || trimmedLine.endsWith('.mp4') || trimmedLine.endsWith('.aac')) {
+            final String fileName = p.basename(trimmedLine.split('?')[0]); // Get filename without query params
+            if (trimmedLine.endsWith('.m3u8')) {
+              return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
+            } else {
               return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
             }
           }
@@ -441,11 +445,11 @@ class AudioCacheManager {
         return line; // Return original line if not a URL to replace
       }).join('\n');
 
-      // Overwrite the original local manifest file with the rewritten content
+      // Overwrite the local manifest file with the rewritten content.
+      // This means the file on disk (e.g., master.m3u8 or sub.m3u8) will contain proxy URLs.
       await localManifestFile.writeAsString(currentManifestContent);
       print('Rewritten HLS manifest saved: ${localManifestFile.path}');
     }
-
 
     // Calculate total size of the HLS directory
     final int totalHlsSize = await _calculateDirectorySize(trackDir);
@@ -461,13 +465,12 @@ class AudioCacheManager {
   /// Returns a local proxy URL for HLS and encrypted MP3s, or a direct file path for unencrypted MP3s.
   /// Returns null if the track is not cached or invalid.
   Future<String?> getPlaybackUrl(String trackId) async {
-    // Ensure manager is initialized
     if (!_isInitialized) {
       print('AudioCacheManager is not initialized. Call init() first.');
       return null;
     }
 
-    final CacheEntry? entry = await _metadataStore.get(trackId); // Get by trackId
+    final CacheEntry? entry = await _metadataStore.get(trackId);
 
     if (entry == null) {
       print('Track $trackId not found in cache metadata.');
@@ -481,20 +484,21 @@ class AudioCacheManager {
 
     if (!filesExist) {
       print('Files for $trackId missing on disk. Cleaning up metadata.');
-      await _metadataStore.delete(trackId); // Clean up stale metadata
+      await _metadataStore.delete(trackId);
       return null;
     }
 
     // Update last accessed time for LRU
     entry.updateAccessedTime();
-    await entry.save(); // Save changes to Hive
+    await entry.save();
 
     if (entry.isHls) {
-      // Return the URL that points to our local proxy server for the master playlist
-      final String masterM3u8FileName = p.basename(entry.url); // Use original URL's basename
+      // For HLS, we pass the original master m3u8 file name to the proxy.
+      // The proxy will serve the locally rewritten version of that file.
+      final String masterM3u8FileName = p.basename(Uri.parse(entry.url).path);
       return _localProxyServer.getHlsPlaylistProxyUrl(trackId, masterM3u8FileName);
     } else {
-      // Return proxy URL if encrypted, else direct file path
+      // For MP3: return proxy URL if encrypted, else direct file path.
       return entry.isEncrypted ? _localProxyServer.getMp3ProxyUrl(trackId) : entry.localPath;
     }
   }
