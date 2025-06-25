@@ -131,7 +131,7 @@ class AudioCacheManager {
       // where the manifest name is implied or generated.
       // This is a heuristic, be careful with it.
       if ((path.contains('/hls/') || path.contains('/live/')) &&
-          (path.endsWith('.mp4') || path.endsWith('.m4a') || path.endsWith('.aac') || path.endsWith('.ts'))) {
+          (path.endsWith('.mp4')  || path.endsWith('.aac') || path.endsWith('.ts'))) {
         // Example: https://example.com/hls/audio.m4a (where m4a is actually a manifest endpoint)
         // This is less common but can occur with some CDN setups.
         // If this leads to false positives, remove this part.
