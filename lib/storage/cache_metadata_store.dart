@@ -1,57 +1,45 @@
 import 'package:hive/hive.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:path_provider/path_provider.dart'; // No longer strictly needed if Hive.initFlutter is in main()
 import '../models/cache_entry.dart';
 
-
 class CacheMetadataStore {
-  Box? _box; // Remove late, make nullable
-  bool _isInitialized = false; // Track initialization state
+  late final Box<CacheEntry> _box;
 
   Future<void> init() async {
-    if (_isInitialized) return; // Prevent reinitialization
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-      Hive.init(dir.path);
-      _box = await Hive.openBox('audio_cache_metadata');
-      _isInitialized = true;
-    } catch (e) {
-      throw Exception('Failed to initialize cache metadata store: $e');
+    // Hive.initFlutter() and Hive.registerAdapter() should be called ONCE in main()
+    if (!Hive.isAdapterRegistered(0)) { // 0 is the typeId for CacheEntry
+      Hive.registerAdapter(CacheEntryAdapter());
     }
+
+    _box = await Hive.openBox<CacheEntry>('audio_cache_metadata');
+    print('CacheMetadataStore initialized.');
   }
 
+  // Use trackId as the key
   Future<void> save(CacheEntry entry) async {
-    if (!_isInitialized) await init();
-    await _box!.put(entry.url, entry.toMap());
+    await _box.put(entry.trackId, entry); // Save with trackId as key
   }
 
-  Future<CacheEntry?> get(String url) async {
-    if (!_isInitialized) await init();
-    final map = _box!.get(url);
-    return map != null ? CacheEntry.fromMap(Map<String, dynamic>.from(map)) : null;
+  // Get by trackId
+  Future<CacheEntry?> get(String trackId) async {
+    return _box.get(trackId); // Get by trackId
   }
 
   Future<List<CacheEntry>> getAll() async {
-    if (!_isInitialized) await init();
-    return _box!.values
-        .map((e) => CacheEntry.fromMap(Map<String, dynamic>.from(e)))
-        .toList();
+    return _box.values.toList();
   }
 
-  Future<void> delete(String url) async {
-    if (!_isInitialized) await init();
-    await _box!.delete(url);
+  // Delete by trackId
+  Future<void> delete(String trackId) async {
+    await _box.delete(trackId); // Delete by trackId
   }
 
   Future<void> clear() async {
-    if (!_isInitialized) await init();
-    await _box!.clear();
+    await _box.clear();
   }
 
-  Future<void> dispose() async {
-    if (_isInitialized) {
-      await _box?.close();
-      _isInitialized = false;
-      _box = null;
-    }
+  /// Get the current total size of all cached items based on metadata.
+  int getCurrentCacheSize() {
+    return _box.values.fold(0, (sum, entry) => sum + entry.fileSize);
   }
 }

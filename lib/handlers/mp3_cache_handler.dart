@@ -1,33 +1,43 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
+import 'package:dio/dio.dart' show Dio, DioException, Options, ResponseType;
 import 'package:http/http.dart' as http;
 import '../utils/aes_encryptor.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'dart:typed_data';
+
 class Mp3CacheHandler {
-  Future<File?> download(String url, {bool encrypt = false, required String encryptionKey, required String trackId}) async {
+  final Dio _dio = Dio(); // Use Dio for better download control
+
+  /// Downloads an MP3 file from the given URL.
+  /// Returns the raw bytes of the downloaded file.
+  Future<Uint8List?> downloadMp3Bytes(String url, {Function(int received, int total)? onProgress}) async {
     try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode != 200) return null;
+      final response = await _dio.get<Uint8List>(
+        url,
+        options: Options(responseType: ResponseType.bytes), // Ensure response is bytes
+        onReceiveProgress: onProgress,
+      );
 
-      final dir = await getTemporaryDirectory();
-      final filePath = '${dir.path}/audio_cache/mp3_$trackId.mp3';
-      final file = File(filePath);
-      await file.parent.create(recursive: true);
-
-      if (encrypt) {
-        final aes = AESHelper(encryptionKey);
-        final encrypted = aes.encryptData(response.bodyBytes);
-        await file.writeAsBytes(encrypted);
+      if (response.statusCode == 200 && response.data != null) {
+        return response.data;
       } else {
-        await file.writeAsBytes(response.bodyBytes);
+        print('Failed to download MP3 from $url. Status: ${response.statusCode}');
+        return null;
       }
-
-      return file;
+    } on DioException catch (e) {
+      print('DioError downloading MP3 from $url: ${e.message}');
+      return null;
     } catch (e) {
-      print('Error downloading MP3 track: $e');
+      print('Error downloading MP3 from $url: $e');
       return null;
     }
+  }
+
+  /// Encrypts the given MP3 data.
+  Uint8List encryptMp3Data(Uint8List data) {
+    return AESHelper.encryptData(data);
   }
 }
