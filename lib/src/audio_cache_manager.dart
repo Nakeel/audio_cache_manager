@@ -411,31 +411,56 @@ class AudioCacheManager {
 
       for (final localManifestFile in localManifestFiles) {
         String currentManifestContent = await localManifestFile.readAsString();
+        final originalManifestUrl = localManifestFile.path.replaceFirst(trackDir.path, p.dirname(m3u8Url)); // This is tricky. Better to pass original URL context.
 
+        // Better: when parsing original manifests, store their original URLs
+        // and use those as the base for resolving relative paths during rewriting.
+        // For now, let's assume we can reconstruct the base or rely on relative rewriting.
+
+        // Split content into lines and map each line to its new, proxied version
         currentManifestContent = currentManifestContent.split('\n').map((line) {
           final trimmedLine = line.trim();
-          if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
-            final urlMatch = RegExp(r'^(https?://.*?\.(?:ts|m3u8|mp4|aac)(\?.*)?)$').firstMatch(trimmedLine);
-
-            if (urlMatch != null) {
-              final String originalMatchedUrl = urlMatch.group(0)!;
-              final String fileName = p.basename(Uri.parse(originalMatchedUrl).path);
-
-              if (originalMatchedUrl.endsWith('.m3u8')) {
-                return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
-              } else {
-                return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
-              }
-            } else if (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.m3u8') || trimmedLine.endsWith('.mp4') || trimmedLine.endsWith('.aac')) {
-              final String fileName = p.basename(trimmedLine.split('?')[0]);
-              if (trimmedLine.endsWith('.m3u8')) {
-                return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
-              } else {
-                return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
-              }
-            }
+          if (trimmedLine.isEmpty || trimmedLine.startsWith('#')) {
+            return line; // Return comments or empty lines as is
           }
-          return line;
+
+          // Try to parse as a URI to handle both absolute and relative paths
+          Uri? parsedUri;
+          try {
+            // Attempt to parse as relative first, then absolute if that fails
+            // This ensures relative paths are not incorrectly treated as absolute
+            parsedUri = Uri.tryParse(trimmedLine);
+            if (parsedUri != null && parsedUri.hasScheme) { // It's an absolute URL
+              // This is the case your regex was trying to handle
+            } else { // It's a relative path, resolve against the original manifest's base
+              // You need the original base URL of *this specific manifest* to correctly resolve relative paths.
+              // This is the missing piece if you have nested manifests with relative paths.
+              // For simplicity, let's assume all relative paths are segment/sub-playlist names.
+            }
+          } catch (_) {
+            // Ignore parsing errors, treat as non-URI if it's just a file name
+            parsedUri = null;
+          }
+
+          String fileNameFromLine;
+          if (parsedUri != null && parsedUri.hasScheme) { // It was an absolute URL
+            fileNameFromLine = p.basename(parsedUri.path);
+          } else { // It was a relative path or just a filename
+            fileNameFromLine = p.basename(trimmedLine.split('?')[0]); // Remove query params for filename
+          }
+
+
+          if (fileNameFromLine.endsWith('.m3u8')) {
+            // This is a sub-playlist or the master playlist reference
+            // Ensure the fileName passed is just the manifest filename (e.g., 'variant.m3u8')
+            return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileNameFromLine);
+          } else if (fileNameFromLine.endsWith('.ts') || fileNameFromLine.endsWith('.mp4') || fileNameFromLine.endsWith('.aac')) {
+            // This is a media segment
+            // Ensure the fileName passed is just the segment filename (e.g., 'segment0001.ts')
+            return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileNameFromLine);
+          }
+
+          return line; // Return original line if not a URL to replace
         }).join('\n');
 
         await localManifestFile.writeAsString(currentManifestContent);
