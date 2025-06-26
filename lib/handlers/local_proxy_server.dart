@@ -54,7 +54,7 @@ class LocalProxyServer {
   String getHlsPlaylistProxyUrl(String trackId, String manifestFileName) {
     // THIS IS THE CORRECTED PART:
     // The proxy URL should only point to the local file, not include original CDN tokens/wildcards.
-    return '${_server?.address.host}:$_port/hls_manifests/$trackId/$manifestFileName';
+    return 'http://127.0.0.1:$_port/hls_manifests/$trackId/$manifestFileName';
     // Changed path segment to hls_manifests to differentiate from segment requests if needed.
     // Or keep 'hls' but ensure the regex correctly handles it.
   }
@@ -62,7 +62,7 @@ class LocalProxyServer {
   /// Generates a proxy URL for an HLS segment or other HLS-related file.
   String getHlsSegmentProxyUrl(String trackId, String segmentFileName) {
     // Same logic: should not contain original URL's tokens
-    return '${_server?.address.host}:$_port/hls_segments/$trackId/$segmentFileName';
+    return 'http://127.0.0.1:$_port/hls_segments/$trackId/$segmentFileName';
     // Changed path segment to hls_segments
   }
 
@@ -70,7 +70,7 @@ class LocalProxyServer {
   String getMp3ProxyUrl(String trackId) {
     // We don't need the actual filename here, as the proxy knows to look up by trackId
     // and the CacheEntry will give it the full path including .enc if encrypted.
-    return '${_server?.address.host}:$_port/mp3/$trackId';
+    return 'http://127.0.0.1:$_port/mp3/$trackId';
   }
 
   /// The main request handler for the local HTTP server.
