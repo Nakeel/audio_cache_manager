@@ -21,6 +21,7 @@ class LocalProxyServer {
   // Callbacks to get necessary data from the main cache manager
   late GetCacheEntryFunction _getCacheEntry;
   late IsUserSubscribedFunction _isUserSubscribed;
+  late bool Function() _isEncryptionEnabled;
 
   int get port => _port;
 
@@ -28,9 +29,11 @@ class LocalProxyServer {
   Future<void> init({
     required GetCacheEntryFunction getCacheEntry,
     required IsUserSubscribedFunction isUserSubscribed,
+    required bool Function() isEncryptionEnabled,
   }) async {
     _getCacheEntry = getCacheEntry;
     _isUserSubscribed = isUserSubscribed;
+    _isEncryptionEnabled = isEncryptionEnabled;
 
     final handler = Pipeline()
         .addMiddleware(logRequests())
@@ -137,7 +140,8 @@ class LocalProxyServer {
         return Response.notFound('MP3 file not found in cache: ${entry.localPath}');
       }
 
-      return await _serveFile(file, true);
+      final isEncryptionEnabled = _isEncryptionEnabled();
+      return await _serveFile(file, isEncryptionEnabled);
     }
 
     return Response.notFound('Invalid cached content request: ${request.url}');

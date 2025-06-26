@@ -11,6 +11,9 @@ import '../utils/aes_encryptor.dart';
 import 'package:path/path.dart' as p;
 import 'dart:typed_data';
 
+import 'dart:async';
+
+
 /// Custom cache manager for music tracks, supporting playlists, HLS, and encryption.
 /// It orchestrates downloads, storage, local proxy serving, and metadata management.
 class AudioCacheManager {
@@ -25,10 +28,11 @@ class AudioCacheManager {
   final Mp3CacheHandler _mp3Handler = Mp3CacheHandler();
   final Dio _dio = Dio(); // Dedicated Dio instance for internal downloads
 
-  // Configuration - now `late final` and initialized in `init()`
+  // Configuration - now `late final` and initialized in `configure()`
   late final Duration expirationDuration;
   late final int maxCacheSizeBytes;
   late final String encryptionKey; // THIS IS A PLACEHOLDER - LOAD SECURELY
+  late final bool enableEncryption;
 
   /// Tracks subscription status. This should be set externally by your Auth/Subscription BLoC.
   bool isUserSubscribed = false;
@@ -46,13 +50,16 @@ class AudioCacheManager {
     Duration? expirationDuration,
     int? maxCacheSizeBytes,
     String? encryptionKey,
+    bool? enableEncryption, // NEW PARAMETER
   }) {
     // Initialize late final fields directly
     this.expirationDuration = expirationDuration ?? const Duration(days: 30);
     this.maxCacheSizeBytes = maxCacheSizeBytes ?? 2 * 1024 * 1024 * 1024; // 2GB
     this.encryptionKey = encryptionKey ?? 'your-32-byte-secure-key-here-1234'; // DEMO ONLY: Replace this!
+    this.enableEncryption = enableEncryption ?? false; // Default to false
 
     // Set the encryption key for AESHelper immediately after configuration
+    // This is only relevant if enableEncryption is true and you use AESHelper for encryption
     AESHelper.setEncryptionKey(this.encryptionKey);
   }
 
@@ -65,17 +72,16 @@ class AudioCacheManager {
     }
 
     // Ensure configuration is set. If configure() wasn't called externally, call it now with defaults.
+    // A simple check for a late final field that *must* be set by configure.
+    // Accessing `this.enableEncryption` will throw if `configure` hasn't run.
     try {
-      // Attempt to access a late final field to check if configure() has run
-      // This will throw if not initialized, caught by the outer try/catch
-      // A more explicit flag in configure() is generally better, but this works for late final.
-      if (this.encryptionKey == null) { // Simple check if configured
+      // ignore: unnecessary_null_comparison
+      if (this.enableEncryption == null) { // This check relies on the fact that `late final` fields must be initialized.
         configure(); // Apply defaults if not explicitly configured
       }
     } catch (_) {
       configure(); // Apply defaults if not explicitly configured
     }
-
 
     // 1. Initialize base cache directory
     _baseCacheDir = await getApplicationDocumentsDirectory(); // For persistent cache
@@ -95,13 +101,14 @@ class AudioCacheManager {
         return _metadataStore.get(trackId);
       },
       isUserSubscribed: () => isUserSubscribed,
+      isEncryptionEnabled: () => enableEncryption, // Pass the new config here
     );
 
     // 4. Perform initial cache cleanup on startup
     await _cleanupCache();
 
     _isInitialized = true;
-    print('AudioCacheManager initialized and ready.');
+    print('AudioCacheManager initialized and ready. Encryption Enabled: $enableEncryption');
   }
 
   /// Determines if a given URL is likely an HLS manifest.
@@ -125,21 +132,8 @@ class AudioCacheManager {
       if (query.contains('.m3u8') || query.contains('.m3u')) {
         return true;
       }
-
-      // If the URL contains an HLS specific identifier (like /hls/ or /live/)
-      // and ends with a common video/audio extension, it might be an HLS source
-      // where the manifest name is implied or generated.
-      // This is a heuristic, be careful with it.
-      if ((path.contains('/hls/') || path.contains('/live/')) &&
-          (path.endsWith('.mp4')  || path.endsWith('.aac') || path.endsWith('.ts'))) {
-        // Example: https://example.com/hls/audio.m4a (where m4a is actually a manifest endpoint)
-        // This is less common but can occur with some CDN setups.
-        // If this leads to false positives, remove this part.
-        return true;
-      }
-
     } catch (e) {
-      print('Error parsing URL for HLS detection: $url, error: $e');
+      print('Error parsing URL for HLS detection: $url', );
       // If URL parsing fails, default to false
     }
     return false;
@@ -149,7 +143,6 @@ class AudioCacheManager {
       String originalUrl,
       String trackId, {
         Function(int received, int total)? onProgress,
-        // bool isHls = false, // <-- This parameter is now removed
       }) async {
     // Ensure manager is initialized before any operation
     if (!_isInitialized) {
@@ -158,33 +151,50 @@ class AudioCacheManager {
     }
 
     try {
+      // Determine if content is HLS based on URL
+      final bool currentIsHls = _determineIsHls(originalUrl);
+      // Encryption logic for caching: always encrypt if enableEncryption is true
+      final bool shouldEncrypt = enableEncryption;
+
       // Check if already cached and still valid
       final existingEntry = await _metadataStore.get(trackId);
-      final bool currentIsHls = _determineIsHls(originalUrl); // Determine HLS status here
 
+      // Re-evaluate validity with respect to encryption mode and subscription if existing.
       if (existingEntry != null &&
           await (existingEntry.isHls ? Directory(existingEntry.localPath).exists() : File(existingEntry.localPath).exists()) &&
           DateTime.now().difference(existingEntry.cachedAt) < expirationDuration) {
-        print('Audio $trackId already cached and valid. Path: ${existingEntry.localPath}');
-        // Update lastAccessedAt as caching implies access
-        existingEntry.updateAccessedTime();
-        await existingEntry.save();
-        return trackId;
-      }
 
-      final bool shouldEncrypt = isUserSubscribed;
+        // Crucial: If encryption is enabled, ensure the existing entry's encryption status matches expectations.
+        // If enableEncryption is true, but the existing entry is NOT encrypted, it's a mismatch.
+        // This can happen if enableEncryption was false, and then changed to true.
+        if (enableEncryption && !existingEntry.isEncrypted) {
+          print('Cache entry for $trackId found but encryption status mismatch. Re-downloading.');
+          await _cleanupPartialDownload(trackId, existingEntry.isHls); // Clean up old unencrypted entry
+          // Continue to download new (encrypted) version below
+        } else if (!enableEncryption && existingEntry.isEncrypted) {
+          // If encryption is now disabled, but existing entry IS encrypted, re-download unencrypted version
+          print('Cache entry for $trackId found but encryption status mismatch (encryption now disabled). Re-downloading.');
+          await _cleanupPartialDownload(trackId, existingEntry.isHls); // Clean up old encrypted entry
+          // Continue to download new (unencrypted) version below
+        } else {
+          // Valid and encryption status matches
+          print('Audio $trackId already cached and valid. Path: ${existingEntry.localPath}, Encrypted: ${existingEntry.isEncrypted}');
+          existingEntry.updateAccessedTime();
+          await existingEntry.save();
+          return trackId;
+        }
+      }
 
       String? finalLocalPath;
       int fileSize = 0;
 
-      if (currentIsHls) { // Use the determined HLS status
+      if (currentIsHls) {
         final result = await _downloadHls(originalUrl, trackId, shouldEncrypt, onProgress);
         if (result != null) {
           finalLocalPath = result['localPath'];
           fileSize = result['fileSize'];
         }
       } else {
-        // Handle MP3 download
         final result = await _downloadMp3(originalUrl, trackId, shouldEncrypt, onProgress);
         if (result != null) {
           finalLocalPath = result['localPath'];
@@ -194,22 +204,22 @@ class AudioCacheManager {
 
       if (finalLocalPath != null) {
         final newEntry = CacheEntry(
-          trackId: trackId, // Store trackId in the CacheEntry
-          url: originalUrl, // Original URL
-          localPath: finalLocalPath, // Path to the file or HLS directory
+          trackId: trackId,
+          url: originalUrl,
+          localPath: finalLocalPath,
           cachedAt: DateTime.now(),
-          lastAccessedAt: DateTime.now(), // Set initial last accessed
+          lastAccessedAt: DateTime.now(),
           fileSize: fileSize,
-          isEncrypted: shouldEncrypt,
-          isHls: currentIsHls, // Store the determined HLS status
+          isEncrypted: shouldEncrypt, // Store the actual encryption status of the cached file
+          isHls: currentIsHls,
         );
-        await _metadataStore.save(newEntry); // Save with trackId as key
+        await _metadataStore.save(newEntry);
         print('Cached audio $trackId: ${newEntry.url} to ${newEntry.localPath}, Encrypted: $shouldEncrypt, Size: $fileSize bytes.');
         return trackId;
       }
       return null;
-    } catch (e) {
-      print('Error in cacheAudio for $trackId: $e');
+    } catch (e, st) {
+      print('Error in cacheAudio for $trackId: $e', );
       final bool determinedIsHlsForCleanup = _determineIsHls(originalUrl); // Re-determine for cleanup
       await _cleanupPartialDownload(trackId, determinedIsHlsForCleanup);
       return null;
@@ -221,11 +231,7 @@ class AudioCacheManager {
   Future<void> _cleanupPartialDownload(String trackId, bool isHlsDuringDownload) async {
     final entry = await _metadataStore.get(trackId);
     if (entry != null) {
-      // Use the 'isHls' from the CacheEntry if available, otherwise fallback to the
-      // 'isHlsDuringDownload' which was passed to the cacheAudio function for this specific call.
-      // This fallback is crucial if the entry itself wasn't successfully saved to Hive.
-      final bool typeForCleanup = entry.isHls ?? isHlsDuringDownload;
-
+      final bool typeForCleanup = entry.isHls; // Use the stored type for cleanup
       final FileSystemEntity fileOrDir;
       if (typeForCleanup) {
         fileOrDir = Directory(entry.localPath);
@@ -237,15 +243,14 @@ class AudioCacheManager {
         try {
           await fileOrDir.delete(recursive: true);
           print('Cleaned up files for ${entry.trackId} from disk.');
-        } catch (e) {
-          print('Error deleting files for ${entry.trackId} during cleanup: $e');
+        } catch (e, st) {
+          print('Error deleting files for ${entry.trackId} during cleanup: $e',);
         }
       }
-      await _metadataStore.delete(trackId);
+      await _metadataStore.delete(trackId); // Delete metadata regardless
       print('Cleaned up metadata for ${entry.trackId} from Hive during cleanup.');
     }
   }
-
 
   /// Downloads and saves an MP3 file.
   Future<Map<String, dynamic>?> _downloadMp3(
@@ -296,174 +301,172 @@ class AudioCacheManager {
     print('Created HLS cache directory: ${trackDir.path}');
 
     // 1. Download Master M3U8 Manifest
-    final Response<String> manifestResponse = await _dio.get(
-      m3u8Url,
-      options: Options(responseType: ResponseType.plain),
-    );
-    final String masterM3u8Content = manifestResponse.data!;
-    final String masterM3u8FileName = p.basename(Uri.parse(m3u8Url).path); // Get clean filename from URL path
-    final File localMasterM3u8File = File(p.join(trackDir.path, masterM3u8FileName));
-    await localMasterM3u8File.writeAsString(masterM3u8Content);
-    print('HLS master manifest downloaded: ${localMasterM3u8File.path}');
+    try {
+      final Response<String> manifestResponse = await _dio.get(
+        m3u8Url,
+        options: Options(responseType: ResponseType.plain),
+      );
+      final String masterM3u8Content = manifestResponse.data!;
+      final String masterM3u8FileName = p.basename(Uri.parse(m3u8Url).path);
+      final File localMasterM3u8File = File(p.join(trackDir.path, masterM3u8FileName));
+      await localMasterM3u8File.writeAsString(masterM3u8Content);
+      print('HLS master manifest downloaded: ${localMasterM3u8File.path}');
 
-    // 2. Parse Manifests and Collect All Segment/Sub-playlist URLs
-    // Use a Queue to handle recursive parsing of nested M3U8s
-    Set<String> allMediaUrlsToDownload = {};
-    Queue<String> manifestsToParse = Queue();
-    manifestsToParse.add(m3u8Url); // Start with the master manifest URL
+      // 2. Parse Manifests and Collect All Segment/Sub-playlist URLs
+      Set<String> allMediaUrlsToDownload = {};
+      Queue<String> manifestsToParse = Queue();
+      manifestsToParse.add(m3u8Url);
 
-    Set<String> processedManifestUrls = {}; // Keep track of processed manifest URLs to avoid cycles/re-downloading
+      Set<String> processedManifestUrls = {};
 
-    // Aggregate initial total bytes for progress calculation (approximate)
-    int totalBytesToDownload = 0;
-
-    while (manifestsToParse.isNotEmpty) {
-      final currentManifestUrl = manifestsToParse.removeFirst();
-      if (processedManifestUrls.contains(currentManifestUrl)) {
-        continue;
-      }
-      processedManifestUrls.add(currentManifestUrl);
-
-      String currentManifestContent;
-      if (currentManifestUrl == m3u8Url) {
-        currentManifestContent = masterM3u8Content;
-      } else {
-        try {
-          final subManifestResponse = await _dio.get(
-            currentManifestUrl,
-            options: Options(responseType: ResponseType.plain),
-          );
-          currentManifestContent = subManifestResponse.data!;
-          final subM3u8FileName = p.basename(Uri.parse(currentManifestUrl).path);
-          final File localSubM3u8File = File(p.join(trackDir.path, subM3u8FileName));
-          await localSubM3u8File.writeAsString(currentManifestContent);
-          print('Downloaded sub-manifest: ${localSubM3u8File.path}');
-        } on DioException catch (e) {
-          print('Error downloading sub-manifest $currentManifestUrl: ${e.message}');
+      while (manifestsToParse.isNotEmpty) {
+        final currentManifestUrl = manifestsToParse.removeFirst();
+        if (processedManifestUrls.contains(currentManifestUrl)) {
           continue;
         }
-      }
+        processedManifestUrls.add(currentManifestUrl);
 
-      final lines = currentManifestContent.split('\n');
-      final baseUri = Uri.parse(currentManifestUrl);
+        String currentManifestContent;
+        if (currentManifestUrl == m3u8Url) {
+          currentManifestContent = masterM3u8Content;
+        } else {
+          try {
+            final subManifestResponse = await _dio.get(
+              currentManifestUrl,
+              options: Options(responseType: ResponseType.plain),
+            );
+            currentManifestContent = subManifestResponse.data!;
+            final subM3u8FileName = p.basename(Uri.parse(currentManifestUrl).path);
+            final File localSubM3u8File = File(p.join(trackDir.path, subM3u8FileName));
+            await localSubM3u8File.writeAsString(currentManifestContent);
+            print('Downloaded sub-manifest: ${localSubM3u8File.path}');
+          } on DioException catch (e) {
+            print('Error downloading sub-manifest $currentManifestUrl: ${e.message}');
+            continue;
+          }
+        }
 
-      for (final line in lines) {
-        final trimmedLine = line.trim();
-        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
-          final resolvedUrl = baseUri.resolve(trimmedLine).toString();
-          if (resolvedUrl.endsWith('.m3u8') && !processedManifestUrls.contains(resolvedUrl)) {
-            manifestsToParse.add(resolvedUrl);
-          } else if (resolvedUrl.endsWith('.ts') || resolvedUrl.contains('.mp4') || resolvedUrl.contains('.aac')) {
-            allMediaUrlsToDownload.add(resolvedUrl);
+        final lines = currentManifestContent.split('\n');
+        final baseUri = Uri.parse(currentManifestUrl);
+
+        for (final line in lines) {
+          final trimmedLine = line.trim();
+          if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+            final resolvedUrl = baseUri.resolve(trimmedLine).toString();
+            if (resolvedUrl.endsWith('.m3u8') && !processedManifestUrls.contains(resolvedUrl)) {
+              manifestsToParse.add(resolvedUrl);
+            } else if (resolvedUrl.endsWith('.ts') || resolvedUrl.contains('.mp4') || resolvedUrl.contains('.aac')) {
+              allMediaUrlsToDownload.add(resolvedUrl);
+            }
           }
         }
       }
-    }
-    print('Found ${allMediaUrlsToDownload.length} unique media segments/playlists to download.');
+      print('Found ${allMediaUrlsToDownload.length} unique media segments/playlists to download.');
 
-    // 3. Download and Encrypt all Media Segments
-    int downloadedCount = 0;
-    int totalItems = allMediaUrlsToDownload.length;
-    List<Future<void>> downloadFutures = [];
+      // 3. Download and Encrypt all Media Segments
+      int downloadedCount = 0;
+      int totalItems = allMediaUrlsToDownload.length;
+      List<Future<void>> downloadFutures = [];
 
-    for (final mediaUrl in allMediaUrlsToDownload) {
-      downloadFutures.add(() async {
-        final String mediaFileName = p.basename(Uri.parse(mediaUrl).path); // Get clean filename from URL path
-        final String localMediaPath = p.join(trackDir.path, mediaFileName);
+      for (final mediaUrl in allMediaUrlsToDownload) {
+        downloadFutures.add(() async {
+          final String mediaFileName = p.basename(Uri.parse(mediaUrl).path);
+          final String localMediaPath = p.join(trackDir.path, mediaFileName);
 
+          try {
+            final Response<Uint8List> mediaResponse = await _dio.get<Uint8List>(
+              mediaUrl,
+              options: Options(responseType: ResponseType.bytes),
+            );
+
+            if (mediaResponse.statusCode == 200 && mediaResponse.data != null) {
+              Uint8List bytesToSave = mediaResponse.data!;
+              if (shouldEncrypt) {
+                bytesToSave = AESHelper.encryptData(mediaResponse.data!);
+                print('Encrypted segment: $mediaFileName');
+              }
+              await File(localMediaPath).writeAsBytes(bytesToSave);
+              downloadedCount++;
+              if (onProgress != null) {
+                onProgress(downloadedCount, totalItems);
+              }
+            } else {
+              print('Failed to download media $mediaUrl. Status: ${mediaResponse.statusCode}');
+            }
+          } on DioException catch (e, st) {
+            print('DioError downloading media $mediaUrl: ${e.message}', );
+          } catch (e, st) {
+            print('Error downloading media $mediaUrl: $e', );
+          }
+        }());
+      }
+      await Future.wait(downloadFutures);
+      print('All HLS media segments downloaded and processed for track $trackId.');
+
+      // 4. Rewrite All Local M3U8 Manifests to point to Local Proxy Server
+      final List<File> localManifestFiles = trackDir.listSync(recursive: false)
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.m3u8'))
+          .toList();
+
+      for (final localManifestFile in localManifestFiles) {
+        String currentManifestContent = await localManifestFile.readAsString();
+
+        currentManifestContent = currentManifestContent.split('\n').map((line) {
+          final trimmedLine = line.trim();
+          if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+            final urlMatch = RegExp(r'^(https?://.*?\.(?:ts|m3u8|mp4|aac)(\?.*)?)$').firstMatch(trimmedLine);
+
+            if (urlMatch != null) {
+              final String originalMatchedUrl = urlMatch.group(0)!;
+              final String fileName = p.basename(Uri.parse(originalMatchedUrl).path);
+
+              if (originalMatchedUrl.endsWith('.m3u8')) {
+                return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
+              } else {
+                return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
+              }
+            } else if (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.m3u8') || trimmedLine.endsWith('.mp4') || trimmedLine.endsWith('.aac')) {
+              final String fileName = p.basename(trimmedLine.split('?')[0]);
+              if (trimmedLine.endsWith('.m3u8')) {
+                return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
+              } else {
+                return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
+              }
+            }
+          }
+          return line;
+        }).join('\n');
+
+        await localManifestFile.writeAsString(currentManifestContent);
+        print('Rewritten HLS manifest saved: ${localManifestFile.path}');
+      }
+
+      final int totalHlsSize = await _calculateDirectorySize(trackDir);
+      print('HLS track $trackId total cached size: $totalHlsSize bytes.');
+
+      return {
+        'localPath': trackDir.path,
+        'fileSize': totalHlsSize,
+      };
+    } catch (e, st) {
+      print('Error in _downloadHls for $trackId: $e', );
+      // Clean up the partially created directory if an error occurs during download
+      if (await trackDir.exists()) {
         try {
-          final Response<Uint8List> mediaResponse = await _dio.get<Uint8List>(
-            mediaUrl,
-            options: Options(responseType: ResponseType.bytes),
-          );
-
-          if (mediaResponse.statusCode == 200 && mediaResponse.data != null) {
-            Uint8List bytesToSave = mediaResponse.data!;
-            if (shouldEncrypt) {
-              bytesToSave = AESHelper.encryptData(mediaResponse.data!);
-              print('Encrypted segment: $mediaFileName');
-            }
-            await File(localMediaPath).writeAsBytes(bytesToSave);
-            downloadedCount++;
-            if (onProgress != null) {
-              // Report overall progress for all segments/files
-              onProgress(downloadedCount, totalItems);
-            }
-          } else {
-            print('Failed to download media $mediaUrl. Status: ${mediaResponse.statusCode}');
-          }
-        } on DioException catch (e) {
-          print('DioError downloading media $mediaUrl: ${e.message}');
-        } catch (e) {
-          print('Error downloading media $mediaUrl: $e');
+          await trackDir.delete(recursive: true);
+          print('Cleaned up partial HLS download directory for $trackId.');
+        } catch (deleteError, deleteSt) {
+          print('Error cleaning up HLS directory for $trackId: $deleteError', );
         }
-      }());
+      }
+      return null;
     }
-    await Future.wait(downloadFutures);
-    print('All HLS media segments downloaded and processed for track $trackId.');
-
-    // 4. Rewrite All Local M3U8 Manifests to point to Local Proxy Server
-    // Iterate through all manifest files saved locally in this track's directory
-    final List<File> localManifestFiles = trackDir.listSync(recursive: false)
-        .whereType<File>()
-        .where((file) => file.path.endsWith('.m3u8'))
-        .toList();
-
-    for (final localManifestFile in localManifestFiles) {
-      String currentManifestContent = await localManifestFile.readAsString();
-
-      // Iterate through lines to find and replace URLs with proxy URLs
-      currentManifestContent = currentManifestContent.split('\n').map((line) {
-        final trimmedLine = line.trim();
-        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
-          // This regex aims to match common HLS media segment and sub-playlist URLs.
-          // It handles URLs that might have query parameters.
-          final urlMatch = RegExp(r'^(https?://.*?\.(?:ts|m3u8|mp4|aac)(\?.*)?)$').firstMatch(trimmedLine);
-
-          if (urlMatch != null) {
-            final String originalMatchedUrl = urlMatch.group(0)!; // The entire matched URL
-            final String fileName = p.basename(Uri.parse(originalMatchedUrl).path); // Clean filename from the matched URL
-
-            if (originalMatchedUrl.endsWith('.m3u8')) {
-              // This is a sub-playlist or the master playlist reference
-              return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
-            } else {
-              // This is a media segment
-              return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
-            }
-          }
-          // If the line is a relative path (e.g., 'segment0001.ts' or 'low.m3u8')
-          else if (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.m3u8') || trimmedLine.endsWith('.mp4') || trimmedLine.endsWith('.aac')) {
-            final String fileName = p.basename(trimmedLine.split('?')[0]); // Get filename without query params
-            if (trimmedLine.endsWith('.m3u8')) {
-              return _localProxyServer.getHlsPlaylistProxyUrl(trackId, fileName);
-            } else {
-              return _localProxyServer.getHlsSegmentProxyUrl(trackId, fileName);
-            }
-          }
-        }
-        return line; // Return original line if not a URL to replace
-      }).join('\n');
-
-      // Overwrite the local manifest file with the rewritten content.
-      // This means the file on disk (e.g., master.m3u8 or sub.m3u8) will contain proxy URLs.
-      await localManifestFile.writeAsString(currentManifestContent);
-      print('Rewritten HLS manifest saved: ${localManifestFile.path}');
-    }
-
-    // Calculate total size of the HLS directory
-    final int totalHlsSize = await _calculateDirectorySize(trackDir);
-    print('HLS track $trackId total cached size: $totalHlsSize bytes.');
-
-    return {
-      'localPath': trackDir.path, // Store path to the HLS track directory
-      'fileSize': totalHlsSize,
-    };
   }
 
   /// Gets the playback URL for a cached audio track.
   /// Returns a local proxy URL for HLS and encrypted MP3s, or a direct file path for unencrypted MP3s.
-  /// Returns null if the track is not cached or invalid.
+  /// Returns null if the track is not cached, invalid, or access is denied due to subscription/encryption settings.
   Future<String?> getPlaybackUrl(String trackId) async {
     if (!_isInitialized) {
       print('AudioCacheManager is not initialized. Call init() first.');
@@ -474,6 +477,15 @@ class AudioCacheManager {
 
     if (entry == null) {
       print('Track $trackId not found in cache metadata.');
+      return null;
+    }
+
+    // NEW LOGIC: Access control based on enableEncryption and subscription
+    if (enableEncryption && !isUserSubscribed) {
+      print('Access denied to cached data for $trackId: Encryption is enabled, but user is not subscribed.');
+      // Optionally, you might want to clear this specific cached item if access is denied,
+      // especially if it's encrypted and an unsubscribed user shouldn't even have it.
+      // await clearAudioCache(trackId); // Consider if this is desired behavior
       return null;
     }
 
@@ -504,6 +516,7 @@ class AudioCacheManager {
   }
 
   /// Checks if a track is present and valid in the cache.
+  /// Includes new logic for subscription-based access if encryption is enabled.
   Future<bool> isAudioCached(String trackId) async {
     // Ensure manager is initialized
     if (!_isInitialized) {
@@ -514,6 +527,12 @@ class AudioCacheManager {
     final entry = await _metadataStore.get(trackId); // Get by trackId
     if (entry == null) return false;
 
+    // NEW LOGIC: Access control based on enableEncryption and subscription
+    if (enableEncryption && !isUserSubscribed) {
+      print('isAudioCached for $trackId: Encryption is enabled, but user is not subscribed. Returning false.');
+      return false; // Treat as not cached if user cannot access
+    }
+
     // Check if the actual files exist and are within expiration
     final bool filesExist = entry.isHls
         ? await Directory(entry.localPath).exists()
@@ -521,7 +540,15 @@ class AudioCacheManager {
 
     final bool notExpired = DateTime.now().difference(entry.cachedAt) < expirationDuration;
 
-    return filesExist && notExpired;
+    // Also check for encryption status consistency if encryption is enabled
+    final bool encryptionStatusMatches = !enableEncryption || (enableEncryption && entry.isEncrypted);
+    if (!encryptionStatusMatches) {
+      print('isAudioCached for $trackId: Encryption status mismatch. Cache entry is not encrypted but encryption is enabled, or vice versa.');
+      // Optionally delete the inconsistent cache entry here or signal re-download in cacheAudio.
+      return false; // Treat as not cached if encryption status is inconsistent
+    }
+
+    return filesExist && notExpired && encryptionStatusMatches;
   }
 
   /// Clears a specific track from cache (files and metadata).
@@ -566,7 +593,6 @@ class AudioCacheManager {
 
   /// Enforce cache size and duration limits.
   Future<void> _cleanupCache() async {
-    // Ensure manager is initialized (implicitly, called from init or after init checks)
     final allEntries = await _metadataStore.getAll();
     final now = DateTime.now();
 
