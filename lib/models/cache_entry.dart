@@ -61,12 +61,14 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
     this.hlsLocalPath,
   });
 
-  /// Helper to get the actual file/directory for cleanup/validation
+  // Helper getter to determine the actual file system entity (File or Directory)
   FileSystemEntity get cacheFileEntity {
-    // If it's HLS and hlsLocalPath is not null, it's a directory
-    // Otherwise, assume it's a single file (like MP3)
-    return isHls && hlsLocalPath != null && hlsLocalPath!.isNotEmpty
-        ? Directory(hlsLocalPath!)
-        : File(filePath);
+    if (isHls) {
+      // For HLS, hlsLocalPath stores the base directory of the cached HLS stream
+      return Directory(hlsLocalPath!);
+    } else {
+      // For MP3s/single files, filePath points to the actual file
+      return File(filePath);
+    }
   }
 }
