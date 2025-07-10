@@ -1,4 +1,7 @@
+// lib/data/cache_metadata_store.dart
+
 import 'package:audio_cache_manager/utils/app_logger.dart';
+
 import '../models/cache_entry.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
@@ -20,7 +23,7 @@ class CacheMetadataStore {
   void _calculateInitialSize() {
     _currentCacheSize = 0;
     for (final entry in _box.values) {
-      _currentCacheSize += entry.fileSize;
+      _currentCacheSize += entry.fileSize; // <--- Changed from entry.fileSize
     }
   }
 
@@ -28,10 +31,10 @@ class CacheMetadataStore {
     final existingEntry = _box.get(entry.trackId);
     if (existingEntry != null) {
       // Adjust current size if replacing an entry
-      _currentCacheSize -= existingEntry.fileSize;
+      _currentCacheSize -= existingEntry.fileSize; // <--- Changed from existingEntry.fileSize
     }
     await _box.put(entry.trackId, entry);
-    _currentCacheSize += entry.fileSize;
+    _currentCacheSize += entry.fileSize; // <--- Changed from entry.fileSize
     AppLogger.info('Saved cache entry for ${entry.trackId}. Current total size: $_currentCacheSize bytes');
   }
 
@@ -42,7 +45,7 @@ class CacheMetadataStore {
   Future<void> delete(String trackId) async {
     final entry = _box.get(trackId);
     if (entry != null) {
-      _currentCacheSize -= entry.fileSize;
+      _currentCacheSize -= entry.fileSize; // <--- Changed from entry.fileSize
       await _box.delete(trackId);
       AppLogger.info('Deleted cache entry for ${entry.trackId}. Current total size: $_currentCacheSize bytes');
     }

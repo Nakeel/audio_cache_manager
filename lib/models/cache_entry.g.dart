@@ -18,36 +18,48 @@ class CacheEntryAdapter extends TypeAdapter<CacheEntry> {
     };
     return CacheEntry(
       trackId: fields[0] as String,
-      url: fields[1] as String,
-      localPath: fields[2] as String,
-      cachedAt: fields[3] as DateTime,
-      lastAccessedAt: fields[4] as DateTime,
-      fileSize: fields[5] as int,
-      isEncrypted: fields[6] as bool,
-      isHls: fields[7] as bool,
+      originalUrl: fields[1] as String,
+      filePath: fields[2] as String,
+      timestamp: fields[3] as DateTime,
+      fileSize: fields[4] as int,
+      isEncrypted: fields[5] as bool,
+      etag: fields[6] as String,
+      lastModified: fields[7] as String,
+      contentType: fields[8] as String,
+      proxyUrl: fields[9] as String,
+      isHls: fields[10] as bool,
+      hlsLocalPath: fields[11] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, CacheEntry obj) {
     writer
-      ..writeByte(8)
+      ..writeByte(12)
       ..writeByte(0)
       ..write(obj.trackId)
       ..writeByte(1)
-      ..write(obj.url)
+      ..write(obj.originalUrl)
       ..writeByte(2)
-      ..write(obj.localPath)
+      ..write(obj.filePath)
       ..writeByte(3)
-      ..write(obj.cachedAt)
+      ..write(obj.timestamp)
       ..writeByte(4)
-      ..write(obj.lastAccessedAt)
-      ..writeByte(5)
       ..write(obj.fileSize)
-      ..writeByte(6)
+      ..writeByte(5)
       ..write(obj.isEncrypted)
+      ..writeByte(6)
+      ..write(obj.etag)
       ..writeByte(7)
-      ..write(obj.isHls);
+      ..write(obj.lastModified)
+      ..writeByte(8)
+      ..write(obj.contentType)
+      ..writeByte(9)
+      ..write(obj.proxyUrl)
+      ..writeByte(10)
+      ..write(obj.isHls)
+      ..writeByte(11)
+      ..write(obj.hlsLocalPath);
   }
 
   @override

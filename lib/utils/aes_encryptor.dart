@@ -2,7 +2,6 @@
 import 'dart:typed_data';
 
 import 'package:encrypt/encrypt.dart' show AES, Encrypted, Encrypter, IV, Key;
-// import 'package:encrypt/encrypt.dart'; // You'd use this package for real encryption
 
 final Key _encryptionKey = Key.fromLength(32); // 256-bit key
 final IV _initializationVector = IV.fromLength(16); // 128-bit IV
