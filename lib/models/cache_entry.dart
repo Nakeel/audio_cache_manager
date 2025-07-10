@@ -1,5 +1,3 @@
-// lib/data/cache_entry.dart
-
 import 'dart:io';
 import 'package:hive/hive.dart'; // Import Hive
 
@@ -44,7 +42,6 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
   @HiveField(11)
   final String? hlsLocalPath; // Path to the local rewritten .m3u8 manifest file / HLS directory
 
-
   CacheEntry({
     required this.trackId,
     required this.originalUrl,
@@ -60,6 +57,37 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
     this.isHls = false,
     this.hlsLocalPath,
   });
+
+  // copyWith method to create a new instance with updated fields
+  CacheEntry copyWith({
+    String? trackId,
+    String? originalUrl,
+    String? filePath,
+    DateTime? timestamp,
+    int? fileSize,
+    bool? isEncrypted,
+    String? etag,
+    String? lastModified,
+    String? contentType,
+    String? proxyUrl,
+    bool? isHls,
+    String? hlsLocalPath,
+  }) {
+    return CacheEntry(
+      trackId: trackId ?? this.trackId,
+      originalUrl: originalUrl ?? this.originalUrl,
+      filePath: filePath ?? this.filePath,
+      timestamp: timestamp ?? this.timestamp,
+      fileSize: fileSize ?? this.fileSize,
+      isEncrypted: isEncrypted ?? this.isEncrypted,
+      etag: etag ?? this.etag,
+      lastModified: lastModified ?? this.lastModified,
+      contentType: contentType ?? this.contentType,
+      proxyUrl: proxyUrl ?? this.proxyUrl,
+      isHls: isHls ?? this.isHls,
+      hlsLocalPath: hlsLocalPath ?? this.hlsLocalPath,
+    );
+  }
 
   // Helper getter to determine the actual file system entity (File or Directory)
   FileSystemEntity get cacheFileEntity {

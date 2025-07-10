@@ -41,34 +41,32 @@ class HlsCacheHandler {
 
       // 2. Parse Master Manifest for Variant Playlists and Select One
       String? selectedVariantPlaylistUrl;
-      final RegExp streamInfRegex = RegExp(r'^#EXT-X-STREAM-INF.*,RESOLUTION=(\d+x\d+).*\n(.*\.m3u8)$', multiLine: true);
-      // Fallback regex in case RESOLUTION is not present or structured differently
-      final RegExp genericVariantRegex = RegExp(r'^(?!#).*(\.m3u8)$', multiLine: true); // Matches lines not starting with # and ending in .m3u8
+      // Regex to find EXT-X-STREAM-INF followed by a URI on the next line
+      final RegExp streamInfPattern = RegExp(r'^#EXT-X-STREAM-INF.*', multiLine: true);
 
 
-      for (final line in masterManifestLines) {
-        // Look for #EXT-X-STREAM-INF lines followed by a .m3u8 URI
-        if (line.startsWith('#EXT-X-STREAM-INF')) {
-          // The actual URI is on the next line or after a newline
-          final int index = masterManifestLines.indexOf(line);
-          if (index + 1 < masterManifestLines.length) {
-            final String nextLine = masterManifestLines[index + 1].trim();
-            if (nextLine.endsWith('.m3u8') && !nextLine.startsWith('#')) {
+      for (int i = 0; i < masterManifestLines.length; i++) {
+        final String currentLine = masterManifestLines[i].trim();
+        if (streamInfPattern.hasMatch(currentLine)) {
+          // If the next line exists and is not a comment and ends with .m3u8, it's a variant playlist
+          if (i + 1 < masterManifestLines.length) {
+            final String nextLine = masterManifestLines[i + 1].trim();
+            if (!nextLine.startsWith('#') && nextLine.endsWith('.m3u8')) {
               selectedVariantPlaylistUrl = _resolveUri(hlsUri, nextLine).toString();
               AppLogger.info('Found variant playlist: $selectedVariantPlaylistUrl', name: 'HlsCacheHandler');
               break; // For simplicity, pick the first one found
             }
           }
-        } else if (line.endsWith('.m3u8') && !line.startsWith('#') && selectedVariantPlaylistUrl == null) {
-          // Handle cases where variant playlists are just listed directly, without EXT-X-STREAM-INF preceding them directly
-          selectedVariantPlaylistUrl = _resolveUri(hlsUri, line.trim()).toString();
-          AppLogger.info('Found direct variant playlist: $selectedVariantPlaylistUrl (No EXT-X-STREAM-INF)', name: 'HlsCacheHandler');
-          break; // For simplicity, pick the first one found
+        } else if (!currentLine.startsWith('#') && currentLine.endsWith('.m3u8') && selectedVariantPlaylistUrl == null) {
+          // Fallback: If master manifest directly lists .m3u8 files without EXT-X-STREAM-INF
+          selectedVariantPlaylistUrl = _resolveUri(hlsUri, currentLine).toString();
+          AppLogger.info('Found direct variant playlist (no EXT-X-STREAM-INF): $selectedVariantPlaylistUrl', name: 'HlsCacheHandler');
+          break;
         }
       }
 
       if (selectedVariantPlaylistUrl == null) {
-        AppLogger.warning('No variant HLS playlist found in master manifest. Attempting to treat master as direct segment list.', name: 'HlsCacheHandler');
+        AppLogger.warning('No explicit variant HLS playlist found in master manifest. Attempting to treat master as direct segment list.', name: 'HlsCacheHandler');
         selectedVariantPlaylistUrl = hlsUrl; // Fallback to original URL
       }
 
@@ -91,17 +89,32 @@ class HlsCacheHandler {
       int downloadedSegments = 0;
 
       for (final line in variantManifestLines) {
-        rewrittenVariantLines.add(line); // Add all lines to rewritten initially
+        final trimmedLine = line.trim(); // Always trim the line
 
-        // Check if the line is a media segment (usually ends with .ts or .mp4, and not a directive)
-        // Simplified check: not a #EXT line and ends with a common media extension
-        if (!line.startsWith('#') && (line.endsWith('.ts') || line.endsWith('.mp4'))) {
+        rewrittenVariantLines.add(line); // Add original line, will be overwritten if it's a segment
+
+        // Robust segment detection:
+        // - Not a comment/directive line
+        // - Ends with a common media segment extension (.ts, .mp4)
+        // - Does NOT contain '.m3u8' (to avoid confusing with nested playlists)
+        if (!trimmedLine.startsWith('#') &&
+            (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.mp4')) &&
+            !trimmedLine.contains('.m3u8')) {
+
+          // Add a very specific log here to confirm entry
+          AppLogger.info('HLS Segment detection SUCCESS for: "$trimmedLine"', name: 'HlsCacheHandler');
+
           totalSegments++;
-          final Uri segmentUri = _resolveUri(variantUri, line.trim());
+          final Uri segmentUri = _resolveUri(variantUri, trimmedLine);
           final String segmentFileName = p.basename(segmentUri.path);
           final String localSegmentPath = p.join(hlsCacheDirPath, segmentFileName);
 
-          rewrittenVariantLines[rewrittenVariantLines.length - 1] = segmentFileName; // Rewrite to local path
+          // Update the last added line in rewrittenVariantLines to point to the local file name
+          // This relies on `rewrittenVariantLines.add(line)` being the previous action
+          if (rewrittenVariantLines.isNotEmpty) {
+            rewrittenVariantLines[rewrittenVariantLines.length - 1] = segmentFileName;
+          }
+
 
           // Download segment
           try {
@@ -110,21 +123,19 @@ class HlsCacheHandler {
             if (segmentResponse.statusCode == 200) {
               final File segmentFile = File(localSegmentPath);
               await segmentFile.writeAsBytes(segmentResponse.bodyBytes);
-              localSegmentPaths.add(localSegmentPath);
+              localSegmentPaths.add(localSegmentPath); // Keep track of downloaded segments
               downloadedSegments++;
               onProgress?.call(downloadedSegments, totalSegments);
               AppLogger.info('Downloaded segment to: $localSegmentPath', name: 'HlsCacheHandler');
             } else {
               AppLogger.warning('Failed to download segment $segmentUri: ${segmentResponse.statusCode}', name: 'HlsCacheHandler');
-              // Continue processing other segments, but this one will be missing
             }
           } catch (e, st) {
             AppLogger.error('Error downloading segment $segmentUri: $e', error: e, stackTrace: st, name: 'HlsCacheHandler');
-            // Continue processing other segments
           }
         } else {
-          // If it's a #EXTINF line, ensure it's still included but not parsed as a segment itself
-          AppLogger.info('HLS Manifest Line (ignored for segment download): $line', name: 'HlsCacheHandler');
+          // This line is not a segment, or it's a directive, or it's another playlist.
+          AppLogger.info('HLS Manifest Line (ignored for segment download logic): "$trimmedLine"', name: 'HlsCacheHandler');
         }
       }
 
@@ -144,35 +155,30 @@ class HlsCacheHandler {
 
       final List<String> rewrittenMasterLines = [];
       bool variantLinked = false;
-      for (final line in masterManifestLines) {
-        rewrittenMasterLines.add(line);
-        if (line.startsWith('#EXT-X-STREAM-INF') && !variantLinked) {
-          final int index = masterManifestLines.indexOf(line);
-          if (index + 1 < masterManifestLines.length) {
-            final String nextLine = masterManifestLines[index + 1].trim();
-            if (nextLine.endsWith('.m3u8') && !nextLine.startsWith('#')) {
+      for (int i = 0; i < masterManifestLines.length; i++) {
+        final String currentLine = masterManifestLines[i].trim();
+        rewrittenMasterLines.add(masterManifestLines[i]); // Add original line
+
+        // Look for EXT-X-STREAM-INF and the subsequent URI
+        if (streamInfPattern.hasMatch(currentLine) && !variantLinked) {
+          if (i + 1 < masterManifestLines.length) {
+            final String nextLine = masterManifestLines[i + 1].trim();
+            if (!nextLine.startsWith('#') && nextLine.endsWith('.m3u8')) {
               // Replace the remote variant URI with the local variant manifest filename
               rewrittenMasterLines[rewrittenMasterLines.length - 1] = localVariantManifestFileName;
-              variantLinked = true; // Link only once
+              variantLinked = true;
             }
           }
-        } else if (line.endsWith('.m3u8') && !line.startsWith('#') && !variantLinked) {
+        } else if (!currentLine.startsWith('#') && currentLine.endsWith('.m3u8') && !variantLinked) {
           // Handle direct variant list without #EXT-X-STREAM-INF
           rewrittenMasterLines[rewrittenMasterLines.length - 1] = localVariantManifestFileName;
           variantLinked = true;
         }
       }
 
-      // Fallback: If no variant was found and rewritten, ensure the local master manifest directly points to segments if applicable.
-      // (This scenario implies selectedVariantPlaylistUrl was the master HLS URL itself)
+      // If no variant was linked (e.g., master manifest was itself the segment list),
+      // ensure the local master manifest is effectively the rewritten variant manifest.
       if (!variantLinked && selectedVariantPlaylistUrl == hlsUrl) {
-        // In this case, the master manifest is essentially the variant manifest,
-        // so we just ensure it's written and points to local segments.
-        // The content should already be rewritten to local paths from step 5,
-        // so simply write the new local master manifest based on the variant one.
-        // For simplicity, if we don't find a variant, we will just use the *downloaded* local variant manifest (which might be the master itself)
-        // as the primary entry point for playback.
-        // This block ensures the master manifest is correctly updated if it was itself the one containing segments.
         await localMasterManifestFile.writeAsString(rewrittenVariantLines.join('\n'));
       } else {
         await localMasterManifestFile.writeAsString(rewrittenMasterLines.join('\n'));
@@ -181,7 +187,7 @@ class HlsCacheHandler {
 
       AppLogger.info('Rewritten HLS master manifest saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
 
-      // Return the path to the local master manifest as the entry point
+      // Return the path to the local master manifest as the entry point for playback
       AppLogger.info('HLS caching complete for track $trackId. Local manifest: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
       return localMasterManifestFile.path;
 
@@ -204,6 +210,7 @@ class HlsCacheHandler {
     // Handle cases where the base path might not end with a '/'
     // e.g., base: 'http://example.com/path/playlist.m3u8', relative: 'segment.ts'
     // should resolve to 'http://example.com/path/segment.ts'
+    // p.join handles trailing slashes correctly.
     final String resolvedPath = p.join(p.dirname(baseUri.path), relativePath);
     return baseUri.replace(path: resolvedPath);
   }
