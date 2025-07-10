@@ -178,54 +178,52 @@ class AudioCacheManager {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
       return null;
     }
-    final CacheEntry? entry = await _metadataStore.get(trackId);
-    if (entry == null) {
-      AppLogger.warning('No cache entry found for $trackId.', name: 'AudioCacheManager');
-      return null;
-    }
-
-    if (!entry.cacheFileEntity.existsSync()) {
-      AppLogger.warning('Cached file/directory for $trackId does not exist on disk. Deleting metadata.', name: 'AudioCacheManager');
-      _metadataStore.delete(trackId);
-      return null;
-    }
-    // --- ADD THIS LOG LINE ---
-    AppLogger.info('DEBUG: Retrieved CacheEntry for $trackId. isHls: ${entry.isHls}, isEncrypted: ${entry.isEncrypted}', name: 'AudioCacheManager');
-    // --- END ADDITION ---
-
-    // For local files, return the direct path
-    if (entry.isHls) {
-      // For HLS, we return the path to the local manifest file
-      final String localManifestPath = entry.hlsManifestFilePath!;
-      AppLogger.info('Returning HLS local manifest path: $localManifestPath', name: 'AudioCacheManager');
-      return 'file://$localManifestPath';
-    } else {
-      // For MP3s, return the proxy URL or direct file path
-      final File cachedFile = File(entry.filePath);
-      if (await cachedFile.exists()) {
-        if (entry.isEncrypted) {
-          // If encrypted, always serve via proxy for decryption.
-          // This part of the code would be incorrectly hit if isHls is false for an HLS file.
-          final proxyUrl = _proxyServer.getProxyUrl(trackId);
-          if (proxyUrl.isEmpty) {
-            AppLogger.error('Proxy server is not active when trying to get proxy URL for encrypted MP3.', name: 'AudioCacheManager');
-            return null;
-          }
-          AppLogger.info('Returning MP3 proxy URL for encrypted file: $proxyUrl', name: 'AudioCacheManager');
-          return proxyUrl;
-        } else {
-          // If not encrypted, can play directly from file system
-          AppLogger.info('Returning direct MP3 file path for unencrypted file: ${cachedFile.path}', name: 'AudioCacheManager');
-          return 'file://${cachedFile.path}';
-        }
-      } else {
-        AppLogger.warning('Cached file not found for trackId: $trackId at ${entry.filePath}', name: 'AudioCacheManager');
+      final CacheEntry? entry = await _metadataStore.get(trackId);
+      if (entry == null) {
+        AppLogger.warning('Cache entry not found for trackId: $trackId', name: 'AudioCacheManager');
         return null;
       }
-    }
-      return entry.filePath;
 
-  }
+      AppLogger.info('DEBUG: Retrieved CacheEntry for $trackId. isHls: ${entry.isHls}, isEncrypted: ${entry.isEncrypted}', name: 'AudioCacheManager');
+
+      // CRITICAL CHANGE FOR ENCRYPTED HLS:
+      // If it's HLS AND encrypted, it must go through the proxy for decryption of segments.
+      // Otherwise, for unencrypted HLS, play directly from file://.
+      if (entry.isHls && entry.isEncrypted) { // <-- NEW CONDITION
+        AppLogger.info('Returning PROXY URL for ENCRYPTED HLS: $trackId', name: 'AudioCacheManager');
+        final proxyUrl = _proxyServer.getProxyUrl(trackId); // Generate proxy URL for the main track ID
+        if (proxyUrl.isEmpty) {
+          AppLogger.error('Proxy server not active for encrypted HLS playback.', name: 'AudioCacheManager');
+          return null;
+        }
+        return proxyUrl; // Serve the main manifest through the proxy
+      } else if (entry.isHls) { // Unencrypted HLS: play directly from file
+        final String localManifestPath = entry.hlsManifestFilePath!;
+        AppLogger.info('Returning HLS local manifest path (unencrypted): $localManifestPath', name: 'AudioCacheManager');
+        return 'file://$localManifestPath';
+      }
+      else {
+        // Existing MP3 logic (also uses proxy for encrypted MP3s)
+        final File cachedFile = File(entry.filePath);
+        if (await cachedFile.exists()) {
+          if (entry.isEncrypted) {
+            final proxyUrl = _proxyServer.getProxyUrl(trackId);
+            if (proxyUrl.isEmpty) {
+              AppLogger.error('Proxy server not active when trying to get proxy URL for encrypted MP3.', name: 'AudioCacheManager');
+              return null;
+            }
+            AppLogger.info('Returning MP3 proxy URL for encrypted file: $proxyUrl', name: 'AudioCacheManager');
+            return proxyUrl;
+          } else {
+            AppLogger.info('Returning direct MP3 file path for unencrypted file: ${cachedFile.path}', name: 'AudioCacheManager');
+            return 'file://${cachedFile.path}';
+          }
+        } else {
+          AppLogger.warning('Cached file not found for trackId: $trackId at ${entry.filePath}', name: 'AudioCacheManager');
+          return null;
+        }
+      }
+    }
 
 
   /// Checks if an audio track is cached.
