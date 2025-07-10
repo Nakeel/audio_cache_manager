@@ -328,6 +328,7 @@ class AudioCacheManager {
         AppLogger.info('Track $trackId is MP3. Returning proxy URL: ${entry.proxyUrl}', name: 'APP');
         return entry.proxyUrl;
     }
+    return null;
   }
 
   Future<void> clearAudioCache(String trackId) async {
