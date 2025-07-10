@@ -4,11 +4,15 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:audio_cache_manager/utils/app_logger.dart';
 import 'package:http/http.dart';
-import 'package:http/http.dart' as http show Response, get;
+import 'package:http/http.dart' as http show ClientException, Response, get;
 import 'package:path/path.dart' as p;
 
 
 class HlsCacheHandler {
+
+  static const int _maxSegmentRetries = 3; // Max retries per segment
+  static const Duration _retryDelay = Duration(seconds: 2); // Initial delay
+
   /// Caches an HLS stream, downloading a selected variant and its segments.
   /// Returns the local path to the rewritten master manifest.
   Future<String?> cacheHls(
@@ -115,26 +119,47 @@ class HlsCacheHandler {
             rewrittenVariantLines[rewrittenVariantLines.length - 1] = segmentFileName;
           }
 
-
-          // Download segment
-          try {
-            AppLogger.info('Downloading segment: $segmentUri', name: 'HlsCacheHandler');
-            final http.Response segmentResponse = await http.get(segmentUri);
-            if (segmentResponse.statusCode == 200) {
-              final File segmentFile = File(localSegmentPath);
-              await segmentFile.writeAsBytes(segmentResponse.bodyBytes);
-              localSegmentPaths.add(localSegmentPath); // Keep track of downloaded segments
-              downloadedSegments++;
-              onProgress?.call(downloadedSegments, totalSegments);
-              AppLogger.info('Downloaded segment to: $localSegmentPath', name: 'HlsCacheHandler');
-            } else {
-              AppLogger.warning('Failed to download segment $segmentUri: ${segmentResponse.statusCode}', name: 'HlsCacheHandler');
+          // --- Segment Download with Retry Logic ---
+          bool segmentDownloadedSuccessfully = false;
+          int retries = 0;
+          while (!segmentDownloadedSuccessfully && retries < _maxSegmentRetries) {
+            try {
+              AppLogger.info('Downloading segment: $segmentUri (Attempt ${retries + 1}/${_maxSegmentRetries})', name: 'HlsCacheHandler');
+              final http.Response segmentResponse = await http.get(segmentUri);
+              if (segmentResponse.statusCode == 200) {
+                final File segmentFile = File(localSegmentPath);
+                await segmentFile.writeAsBytes(segmentResponse.bodyBytes);
+                localSegmentPaths.add(localSegmentPath);
+                downloadedSegments++;
+                onProgress?.call(downloadedSegments, totalSegments);
+                AppLogger.info('Downloaded segment to: $localSegmentPath', name: 'HlsCacheHandler');
+                segmentDownloadedSuccessfully = true; // Mark as success
+              } else {
+                AppLogger.warning('Failed to download segment $segmentUri: HTTP ${segmentResponse.statusCode}. Retrying...', name: 'HlsCacheHandler');
+                retries++;
+                await Future.delayed(_retryDelay * (retries)); // Exponential backoff for delay
+              }
+            } on SocketException catch (e) {
+              AppLogger.error('SocketException downloading segment $segmentUri (Attempt ${retries + 1}): $e. Retrying...', error: e, name: 'HlsCacheHandler');
+              retries++;
+              await Future.delayed(_retryDelay * (retries));
+            } on http.ClientException catch (e) {
+              AppLogger.error('ClientException downloading segment $segmentUri (Attempt ${retries + 1}): $e. Retrying...', error: e, name: 'HlsCacheHandler');
+              retries++;
+              await Future.delayed(_retryDelay * (retries));
+            } catch (e, st) {
+              AppLogger.error('Unexpected error downloading segment $segmentUri: $e', error: e, stackTrace: st, name: 'HlsCacheHandler');
+              // For other unexpected errors, don't retry, just break
+              break;
             }
-          } catch (e, st) {
-            AppLogger.error('Error downloading segment $segmentUri: $e', error: e, stackTrace: st, name: 'HlsCacheHandler');
+          }
+
+          if (!segmentDownloadedSuccessfully) {
+            AppLogger.error('Failed to download segment $segmentUri after $_maxSegmentRetries attempts. Continuing with next segment.', name: 'HlsCacheHandler');
+            // If a complete stream is essential, you might return null here or accumulate errors.
+            // For now, we continue, allowing for potentially incomplete cached streams.
           }
         } else {
-          // This line is not a segment, or it's a directive, or it's another playlist.
           AppLogger.info('HLS Manifest Line (ignored for segment download logic): "$trimmedLine"', name: 'HlsCacheHandler');
         }
       }
