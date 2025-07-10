@@ -86,6 +86,20 @@ class AudioCacheManager {
     return true;
   }
 
+  /// Returns information about the current cache state.
+  Future<Map<String, dynamic>> getCacheInfo() async {
+    if (!_isInitialized) {
+      AppLogger.warning('AudioCacheManager not initialized when calling getCacheInfo.', name: 'AudioCacheManager');
+      return {'cachedCount': 0, 'currentSize': 0};
+    }
+    final allEntries = await _metadataStore.getAll();
+    final currentSize = _metadataStore.getCurrentCacheSize();
+    return {
+      'cachedCount': allEntries.length,
+      'currentSize': currentSize,
+    };
+  }
+
   Future<String?> cacheAudio(
       String url,
       String trackId, {
