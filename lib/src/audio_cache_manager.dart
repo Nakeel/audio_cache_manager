@@ -128,7 +128,7 @@ class AudioCacheManager {
           AppLogger.info('Audio $trackId already cached and valid. Path: ${existingEntry.localPath}');
           existingEntry.updateAccessedTime();
           await existingEntry.save();
-          return trackId;
+          return Uri.file(existingEntry.localPath).toString();
         } else {
           AppLogger.warning('Cache entry for $trackId found but file size mismatch. Re-downloading.');
           await _cleanupPartialDownload(trackId, isHls); // Clean up inconsistent entry
@@ -154,7 +154,7 @@ class AudioCacheManager {
         );
         await _metadataStore.save(newEntry);
         AppLogger.info('Cached audio $trackId: ${newEntry.url} to ${newEntry.localPath}, Size: $fileSize bytes.');
-        return trackId;
+        return Uri.file(finalLocalPath).toString();
       }
       return null;
     } catch (e, st) {
