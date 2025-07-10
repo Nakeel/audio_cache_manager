@@ -12,10 +12,9 @@ class Mp3CacheHandler {
   final Dio _dio = Dio();
   bool _isInitialized = false;
 
-  Future<void> init() async {
+  Future<void> init(String baseCacheDirPath) async {
     if (_isInitialized) return;
-    final appDocDir = await getApplicationDocumentsDirectory();
-    _cacheDirPath = '${appDocDir.path}/audio_cache';
+    _cacheDirPath = baseCacheDirPath; // Use the provided base path
     final cacheDir = Directory(_cacheDirPath);
     if (!await cacheDir.exists()) {
       await cacheDir.create(recursive: true);
@@ -31,7 +30,7 @@ class Mp3CacheHandler {
     // Sanitize trackId to be a valid filename for the file system
     final sanitizedTrackId = trackId.replaceAll(RegExp(r'[^\w\s.-]'), '_'); // Replace invalid chars with underscore
     // Using a fixed extension for MP3s
-    return '$sanitizedTrackId.mp3';
+    return 'mp3_$sanitizedTrackId.mp3';
   }
 
   /// Downloads and caches an MP3 file. Returns the local path and file size.

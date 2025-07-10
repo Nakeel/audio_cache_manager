@@ -23,6 +23,7 @@ class AudioCacheManager {
   late String _cacheDirPath;
   late CacheMetadataStore _metadataStore;
   late LocalProxyServer _proxyServer;
+  late Mp3CacheHandler _mp3CacheHandler;
   // No direct instance of AESHelper needed if all methods are static
   late HlsCacheHandler _hlsCacheHandler;
 
@@ -53,11 +54,13 @@ class AudioCacheManager {
 
     _cacheDirPath = await _getCacheDirPath();
     _metadataStore = CacheMetadataStore();
+    _mp3CacheHandler = Mp3CacheHandler();
     // Pass metadataStore to LocalProxyServer constructor
     _proxyServer = LocalProxyServer(cacheDirPath: _cacheDirPath, metadataStore: _metadataStore);
     _hlsCacheHandler = HlsCacheHandler();
 
     await _metadataStore.init();
+    await _mp3CacheHandler.init(_cacheDirPath);
     await _proxyServer.start();
     // Removed _encryptionHelper.init() - AESHelper is static
     AppLogger.info('EncryptionHelper (AESHelper) does not require explicit initialization as it uses static methods.', name: 'AudioCacheManager');
@@ -219,37 +222,45 @@ class AudioCacheManager {
         AppLogger.info('Cached HLS $trackId. Local manifest: $localManifestFilePath', name: 'APP');
         return localManifestFilePath; // Return the manifest path for playback
       } else {
-        // ... (Existing MP3 caching logic) ...
-        final http.Response response = await http.get(uri);
-        if (response.statusCode == 200) {
-          final File tempFile = File(tempFilePath);
-          await tempFile.writeAsBytes(response.bodyBytes);
+        AppLogger.info('Track $trackId is MP3. Attempting to cache MP3 stream.', name: 'AudioCacheManager');
 
-          final File finalFile = File(p.join(_cacheDirPath, finalFileName));
-          await tempFile.rename(finalFile.path);
+        // --- CORRECTED MP3 CACHING LOGIC ---
+        final Map<String, dynamic>? result = await _mp3CacheHandler.cacheAudio(
+          url,
+          _cacheDirPath, // Pass the base cache directory
+          onProgress: onProgress,
+          // encrypt: true, // Uncomment and set as needed if you implement encryption
+        );
 
-          final newEntry = CacheEntry(
-            trackId: trackId,
-            originalUrl: url,
-            filePath: finalFile.path,
-            timestamp: DateTime.now(),
-            fileSize: response.contentLength??0,
-            isEncrypted: false,
-            etag: response.headers['etag'] ?? '',
-            lastModified: response.headers['last-modified'] ?? '',
-            contentType: response.headers['content-type'] ?? 'application/octet-stream',
-            proxyUrl: '',
-            isHls: false,
-            hlsLocalPath: null,
-          );
-          await _metadataStore.save(newEntry);
-          await _cleanupCache();
-
-          return finalFile.path;
-        } else {
-          AppLogger.error('Failed to download audio from $url: ${response.statusCode}', name: 'APP');
+        if (result == null) {
+          AppLogger.error('Failed to cache MP3 stream: $url', name: 'AudioCacheManager');
           return null;
         }
+
+        final String localPath = result['localPath'];
+        final int fileSize = result['fileSize'];
+
+        final newEntry = CacheEntry(
+          trackId: trackId,
+          originalUrl: url,
+          filePath: localPath,
+          timestamp: DateTime.now(),
+          fileSize: fileSize,
+          isEncrypted: false, // Update based on encryption logic in Mp3CacheHandler
+          etag: '',
+          lastModified: '',
+          contentType: 'audio/mpeg', // Default for MP3, could be dynamic from headers if Dio supports it
+          proxyUrl: '',
+          isHls: false,
+          hlsLocalPath: null,
+          hlsManifestFilePath: null,
+        );
+        await _metadataStore.save(newEntry);
+        await _cleanupCache();
+
+        AppLogger.info('Cached MP3 $trackId. Local path: $localPath', name: 'AudioCacheManager');
+        return localPath;
+
       }
     } catch (e, st) {
       AppLogger.error('Error caching audio $url: $e', error: e, stackTrace: st, name: 'APP');
