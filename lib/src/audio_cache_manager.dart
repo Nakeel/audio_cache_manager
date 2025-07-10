@@ -24,13 +24,12 @@ class AudioCacheManager {
   late CacheMetadataStore _metadataStore;
   late LocalProxyServer _proxyServer;
   late Mp3CacheHandler _mp3CacheHandler;
-  late HlsCacheHandler _hlsCacheHandler; // Now requires proxyServer
+  late HlsCacheHandler _hlsCacheHandler;
 
   bool _isInitialized = false;
   Duration _expirationDuration = const Duration(days: 30);
   int _maxCacheSizeBytes = 500 * 1024 * 1024; // Default 500 MB
 
-  // Track initialisation state, for external access if needed
   bool get isInitialized => _isInitialized;
 
   Future<void> init() async {
@@ -45,21 +44,16 @@ class AudioCacheManager {
     _metadataStore = CacheMetadataStore();
     await _metadataStore.init();
 
-    // Initialize LocalProxyServer AFTER metadataStore is ready
     _proxyServer = LocalProxyServer(cacheDirPath: _cacheDirPath, metadataStore: _metadataStore);
-    await _proxyServer.start(); // Start the proxy server
+    await _proxyServer.start();
 
     _mp3CacheHandler = Mp3CacheHandler();
-    await _mp3CacheHandler.init(_cacheDirPath); // Pass the base cache path
+    await _mp3CacheHandler.init(_cacheDirPath);
 
-    // Initialize HlsCacheHandler with the proxyServer instance
     _hlsCacheHandler = HlsCacheHandler(proxyServer: _proxyServer);
 
     _isInitialized = true;
     AppLogger.info('AudioCacheManager initialized. Cache directory: $_cacheDirPath', name: 'AudioCacheManager');
-
-    // Run initial cleanup after initialization
-    // _cleanupCache(); // Moved to be called explicitly or periodically later
   }
 
   /// Caches an audio file (MP3 or HLS).
@@ -68,7 +62,7 @@ class AudioCacheManager {
     required String trackId,
     required String originalUrl,
     bool isHls = false,
-    bool encrypt = false, // Add encrypt parameter here
+    bool encrypt = false,
     Function(int received, int total)? onProgress,
   }) async {
     if (!_isInitialized) {
@@ -76,16 +70,14 @@ class AudioCacheManager {
       return null;
     }
 
-    // Check if already cached and valid
     final CacheEntry? existingEntry = await _metadataStore.get(trackId);
     if (existingEntry != null && existingEntry.originalUrl == originalUrl) {
-      // Basic validation: Check if file exists on disk
       if (existingEntry.cacheFileEntity.existsSync()) {
         AppLogger.info('Audio $trackId already cached and exists on disk. Returning existing path.', name: 'AudioCacheManager');
-        return getPlaybackUrl(trackId); // Return existing proxy/local URL
+        return getPlaybackUrl(trackId);
       } else {
         AppLogger.warning('Metadata for $trackId found, but file does not exist. Re-downloading.', name: 'AudioCacheManager');
-        await _metadataStore.delete(trackId); // Clean up stale metadata
+        await _metadataStore.delete(trackId);
       }
     }
 
@@ -94,16 +86,15 @@ class AudioCacheManager {
     String? localPath;
     int? fileSize;
     String contentType;
-    String proxyUrl = ''; // Default empty, will be set for HLS and if MP3 proxying desired
+    String proxyUrl = '';
 
     if (isHls) {
-      // HLS Caching
       final String? hlsLocalMasterManifestPath = await _hlsCacheHandler.cacheHls(
         originalUrl,
         _cacheDirPath,
         trackId,
         onProgress: onProgress,
-        encrypt: encrypt, // Pass encrypt flag to HlsCacheHandler
+        encrypt: encrypt,
       );
 
       if (hlsLocalMasterManifestPath == null) {
@@ -111,7 +102,6 @@ class AudioCacheManager {
         return null;
       }
 
-      // Calculate total size of HLS cache for metadata
       int hlsTotalSize = 0;
       final Directory hlsTrackDir = Directory(p.join(_cacheDirPath, trackId));
       if (await hlsTrackDir.exists()) {
@@ -122,35 +112,33 @@ class AudioCacheManager {
         }
       }
 
-      // The playback URL for HLS will be the proxy URL to its master manifest
       proxyUrl = _proxyServer.getHlsManifestProxyUrl(trackId, p.basename(Uri.parse(originalUrl).path));
-      contentType = 'application/x-mpegURL'; // Standard HLS content type
+      contentType = 'application/x-mpegURL';
 
       final newEntry = CacheEntry(
         trackId: trackId,
         originalUrl: originalUrl,
-        filePath: '', // Not applicable for HLS directly
+        filePath: '',
         timestamp: DateTime.now(),
-        fileSize: hlsTotalSize, // Store total size of HLS directory
+        fileSize: hlsTotalSize,
         isEncrypted: encrypt,
-        etag: '', // Not typically applicable for HLS full stream
+        etag: '',
         lastModified: '',
         contentType: contentType,
-        proxyUrl: proxyUrl, // Store proxy URL for HLS playback
+        proxyUrl: proxyUrl,
         isHls: true,
         hlsLocalPath: hlsTrackDir.path,
-        hlsManifestFilePath: hlsLocalMasterManifestPath, // Path to the local rewritten master manifest
+        hlsManifestFilePath: hlsLocalMasterManifestPath,
       );
       await _metadataStore.save(newEntry);
       return proxyUrl;
 
     } else {
-      // MP3 Caching
       final Map<String, dynamic>? mp3CacheResult = await _mp3CacheHandler.cacheAudio(
         originalUrl,
         trackId,
         onProgress: onProgress,
-        encrypt: encrypt, // Pass encrypt flag to Mp3CacheHandler
+        encrypt: encrypt,
       );
 
       if (mp3CacheResult == null) {
@@ -160,13 +148,7 @@ class AudioCacheManager {
 
       localPath = mp3CacheResult['localPath'] as String;
       fileSize = mp3CacheResult['fileSize'] as int;
-      contentType = 'audio/mpeg'; // Standard MP3 content type
-
-      // For MP3s, we can either return the localPath or the proxyUrl
-      // Based on our previous discussion and your current working setup,
-      // we'll primarily use the localPath for MP3s for direct playback.
-      // If you later decide to force MP3s through proxy (Phase 2), change this.
-      // proxyUrl = _proxyServer.getMp3ProxyUrl(trackId); // Uncomment this line to use proxy for MP3s
+      contentType = 'audio/mpeg';
 
       final newEntry = CacheEntry(
         trackId: trackId,
@@ -175,17 +157,16 @@ class AudioCacheManager {
         timestamp: DateTime.now(),
         fileSize: fileSize,
         isEncrypted: encrypt,
-        etag: '', // Can be extended to store ETag/Last-Modified for revalidation
+        etag: '',
         lastModified: '',
         contentType: contentType,
-        proxyUrl: proxyUrl, // This will be empty string if not using proxy for MP3s
+        proxyUrl: proxyUrl,
         isHls: false,
         hlsLocalPath: null,
         hlsManifestFilePath: null,
       );
       await _metadataStore.save(newEntry);
 
-      // Return the direct local path for MP3s, unless you uncommented the proxyUrl line above
       return localPath;
     }
   }
@@ -201,24 +182,19 @@ class AudioCacheManager {
       return null;
     }
 
-    // Validate if the file/directory still exists on disk
     if (!entry.cacheFileEntity.existsSync()) {
       AppLogger.warning('Cached file/directory for $trackId does not exist on disk. Deleting metadata.', name: 'AudioCacheManager');
-      _metadataStore.delete(trackId); // Clean up stale metadata
+      _metadataStore.delete(trackId);
       return null;
     }
 
-    // HLS content always uses the proxy URL for playback
     if (entry.isHls) {
-      // The proxyUrl in CacheEntry for HLS should now be the proxy URL to its master manifest
       return entry.proxyUrl;
     } else {
-      // MP3s either use direct filePath or proxyUrl if configured
-      // Based on current setup, MP3s use filePath for direct playback
       if (entry.proxyUrl.isNotEmpty) {
-        return entry.proxyUrl; // If you decide to set proxyUrl for MP3s
+        return entry.proxyUrl;
       }
-      return entry.filePath; // This is what is currently used for MP3s
+      return entry.filePath;
     }
   }
 
@@ -233,7 +209,6 @@ class AudioCacheManager {
     if (entry == null) {
       return false;
     }
-    // Also verify that the actual file/directory exists on disk
     return entry.cacheFileEntity.existsSync();
   }
 
@@ -248,14 +223,12 @@ class AudioCacheManager {
       AppLogger.info('Attempting to delete cache for $trackId', name: 'AudioCacheManager');
       try {
         if (entry.isHls) {
-          // For HLS, delete the entire directory
           final Directory hlsDir = Directory(entry.hlsLocalPath!);
           if (await hlsDir.exists()) {
             await hlsDir.delete(recursive: true);
             AppLogger.info('Deleted HLS cache directory: ${hlsDir.path}', name: 'AudioCacheManager');
           }
         } else {
-          // For MP3s, delete the single file
           final File file = File(entry.filePath);
           if (await file.exists()) {
             await file.delete();
@@ -272,15 +245,75 @@ class AudioCacheManager {
     }
   }
 
+  /// **NEW:** Clears all cached audio files and their metadata.
+  Future<void> clearAllCache() async {
+    if (!_isInitialized) {
+      AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
+      return;
+    }
+    AppLogger.info('Clearing all cache...', name: 'AudioCacheManager');
+    try {
+      final List<CacheEntry> allEntries = await _metadataStore.getAll();
+      for (final entry in allEntries) {
+        if (entry.isHls) {
+          final Directory hlsDir = Directory(entry.hlsLocalPath!);
+          if (await hlsDir.exists()) {
+            await hlsDir.delete(recursive: true);
+          }
+        } else {
+          final File file = File(entry.filePath);
+          if (await file.exists()) {
+            await file.delete();
+          }
+        }
+      }
+      await _metadataStore.clear(); // Clear all metadata
+      // Also delete the base cache directory content to be absolutely sure
+      final Directory cacheDir = Directory(_cacheDirPath);
+      if (await cacheDir.exists()) {
+        // Only delete contents, not the directory itself, as it might be recreated on next init
+        await for (var entity in cacheDir.list(recursive: false, followLinks: false)) {
+          if (entity is File) {
+            await entity.delete();
+          } else if (entity is Directory) {
+            await entity.delete(recursive: true);
+          }
+        }
+      }
+      AppLogger.info('All cache cleared successfully.', name: 'AudioCacheManager');
+    } catch (e, st) {
+      AppLogger.error('Error clearing all cache: $e', error: e, stackTrace: st, name: 'AudioCacheManager');
+    }
+  }
+
+
+  /// **NEW:** Returns the number of currently cached audio items.
+  Future<int> getCachedItemCount() async {
+    if (!_isInitialized) {
+      AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
+      return 0;
+    }
+    return (await _metadataStore.getAll()).length;
+  }
+
+  /// **NEW:** Returns the total size of currently cached audio items in bytes.
+  Future<int> getCurrentCacheSize() async {
+    if (!_isInitialized) {
+      AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
+      return 0;
+    }
+    return _metadataStore.getCurrentCacheSize(); // Delegate to CacheMetadataStore
+  }
+
   /// Cleans up the cache based on size and expiration duration.
   Future<void> _cleanupCache() async {
     if (!_isInitialized) return;
     AppLogger.info('Running cache cleanup...', name: 'AudioCacheManager');
 
     final List<CacheEntry> allEntries = await _metadataStore.getAll();
-    allEntries.sort((a, b) => a.timestamp.compareTo(b.timestamp)); // Sort by oldest first
+    allEntries.sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
-    int currentTotalSize = _metadataStore.getCurrentCacheSize(); // Get current size from store
+    int currentTotalSize = _metadataStore.getCurrentCacheSize();
     final List<String> entriesToDelete = [];
 
     // 1. Delete expired entries
@@ -291,7 +324,6 @@ class AudioCacheManager {
         if (entry.isHls && entry.hlsLocalPath != null) {
           final Directory hlsDir = Directory(entry.hlsLocalPath!);
           if (await hlsDir.exists()) {
-            // Need to get actual size of HLS dir before deleting for accurate accounting
             int hlsDeletedSize = 0;
             await for (var entity in hlsDir.list(recursive: true, followLinks: false)) {
               if (entity is File) {
@@ -301,8 +333,7 @@ class AudioCacheManager {
             await hlsDir.delete(recursive: true);
             currentTotalSize -= hlsDeletedSize;
           } else {
-            // If directory doesn't exist, just remove its metadata
-            currentTotalSize -= entry.fileSize; // Assume stored size for accounting
+            currentTotalSize -= entry.fileSize;
           }
         } else {
           final File file = File(entry.filePath);
@@ -310,16 +341,13 @@ class AudioCacheManager {
             await file.delete();
             currentTotalSize -= entry.fileSize;
           } else {
-            // If file doesn't exist, just remove its metadata
-            currentTotalSize -= entry.fileSize; // Assume stored size for accounting
+            currentTotalSize -= entry.fileSize;
           }
         }
         entriesToDelete.add(entry.trackId);
       }
     }
 
-    // 2. Delete oldest entries if still over capacity
-    // Re-fetch all entries after expiring some, to get an updated sorted list
     final List<CacheEntry> remainingEntries = (await _metadataStore.getAll())..sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
     for (final entry in remainingEntries) {
@@ -327,7 +355,7 @@ class AudioCacheManager {
         AppLogger.info('Cache over capacity. Deleting oldest entry: ${entry.trackId}', name: 'AudioCacheManager');
         if (entry.isHls && entry.hlsLocalPath != null) {
           final Directory hlsDir = Directory(entry.hlsLocalPath!);
-          int hlsDeletedSize = 0; // Calculate actual size for accounting
+          int hlsDeletedSize = 0;
           if (await hlsDir.exists()) {
             await for (var entity in hlsDir.list(recursive: true, followLinks: false)) {
               if (entity is File) {
@@ -336,7 +364,7 @@ class AudioCacheManager {
             }
             await hlsDir.delete(recursive: true);
           }
-          currentTotalSize -= hlsDeletedSize; // Subtract actual size deleted
+          currentTotalSize -= hlsDeletedSize;
         } else {
           final File file = File(entry.filePath);
           if (await file.exists()) {
@@ -346,12 +374,10 @@ class AudioCacheManager {
         }
         entriesToDelete.add(entry.trackId);
       } else {
-        break; // Stop if no longer over capacity
+        break;
       }
     }
 
-
-    // Final pass: delete metadata for all identified entries
     for (final trackId in entriesToDelete) {
       await _metadataStore.delete(trackId);
       AppLogger.info('Deleted cache entry metadata for $trackId.', name: 'AudioCacheManager');
@@ -378,7 +404,6 @@ class AudioCacheManager {
     }
   }
 
-  // --- Public Getters/Setters for Configuration ---
   void setMaxCacheSize(int bytes) {
     if (bytes < 0) {
       AppLogger.warning('Max cache size cannot be negative. Setting to 0.', name: 'AudioCacheManager');
