@@ -62,8 +62,10 @@ class HlsCacheHandler {
       // For subtitles, you might want to extend this to select a default subtitle if needed
       final RegExp subtitleMediaInfPattern = RegExp(r'^#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="([^"]+)".*URI="([^"]+)".*(DEFAULT=(YES|NO))?', multiLine: true);
 
+// Initialize minBandwidth to a very large number, so any actual bandwidth will be smaller
+      int minBandwidth = 2147483647; // Dart's maximum integer value (approx 2^31 - 1), or a sufficiently large number
 
-      // First pass: Identify highest bandwidth video variant
+// First pass: Identify smallest bandwidth video variant
       for (int i = 0; i < masterManifestOriginalLines.length; i++) {
         final String currentLine = masterManifestOriginalLines[i].trim();
 
@@ -73,15 +75,17 @@ class HlsCacheHandler {
             final int bandwidth = int.parse(streamMatch.group(1)!);
             final String? audioGroupId = streamMatch.group(5); // Capture the AUDIO="group_id" part
 
-            if (bandwidth > maxBandwidth) {
-              maxBandwidth = bandwidth;
+            // Change: Compare if current bandwidth is SMALLER than the current minimum
+            if (bandwidth < minBandwidth) {
+              minBandwidth = bandwidth; // Update the minimum bandwidth found so far
               if (i + 1 < masterManifestOriginalLines.length) {
                 final String nextLine = masterManifestOriginalLines[i + 1].trim();
                 if (!nextLine.startsWith('#') && nextLine.endsWith('.m3u8')) {
                   selectedVideoVariantRelativeUri = nextLine;
                   selectedVideoVariantAbsoluteUrl = _resolveUri(hlsUri, nextLine).toString();
                   selectedAudioGroupId = audioGroupId; // Store associated audio group ID
-                  AppLogger.info('Found new best video variant (BANDWIDTH: $bandwidth): $selectedVideoVariantAbsoluteUrl', name: 'HlsCacheHandler');
+                  // Log message updated to reflect smallest variant selection
+                  AppLogger.info('Found new smallest video variant (BANDWIDTH: $bandwidth): $selectedVideoVariantAbsoluteUrl', name: 'HlsCacheHandler');
                 }
               }
             }
