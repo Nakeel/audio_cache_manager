@@ -189,15 +189,40 @@ class AudioCacheManager {
       _metadataStore.delete(trackId);
       return null;
     }
+    // --- ADD THIS LOG LINE ---
+    AppLogger.info('DEBUG: Retrieved CacheEntry for $trackId. isHls: ${entry.isHls}, isEncrypted: ${entry.isEncrypted}', name: 'AudioCacheManager');
+    // --- END ADDITION ---
 
+    // For local files, return the direct path
     if (entry.isHls) {
-      // HLS content is always served via the proxy because the manifest and segments are local.
-      return entry.proxyUrl;
+      // For HLS, we return the path to the local manifest file
+      final String localManifestPath = entry.hlsManifestFilePath!;
+      AppLogger.info('Returning HLS local manifest path: $localManifestPath', name: 'AudioCacheManager');
+      return 'file://$localManifestPath';
     } else {
-      // For MP3s: if encrypted, it must be played via the proxy; otherwise, use the direct file path.
-      if (entry.isEncrypted && entry.proxyUrl.isNotEmpty) {
-        return entry.proxyUrl;
+      // For MP3s, return the proxy URL or direct file path
+      final File cachedFile = File(entry.filePath);
+      if (await cachedFile.exists()) {
+        if (entry.isEncrypted) {
+          // If encrypted, always serve via proxy for decryption.
+          // This part of the code would be incorrectly hit if isHls is false for an HLS file.
+          final proxyUrl = _proxyServer.getProxyUrl(trackId);
+          if (proxyUrl.isEmpty) {
+            AppLogger.error('Proxy server is not active when trying to get proxy URL for encrypted MP3.', name: 'AudioCacheManager');
+            return null;
+          }
+          AppLogger.info('Returning MP3 proxy URL for encrypted file: $proxyUrl', name: 'AudioCacheManager');
+          return proxyUrl;
+        } else {
+          // If not encrypted, can play directly from file system
+          AppLogger.info('Returning direct MP3 file path for unencrypted file: ${cachedFile.path}', name: 'AudioCacheManager');
+          return 'file://${cachedFile.path}';
+        }
+      } else {
+        AppLogger.warning('Cached file not found for trackId: $trackId at ${entry.filePath}', name: 'AudioCacheManager');
+        return null;
       }
+    }
       return entry.filePath;
     }
   }
