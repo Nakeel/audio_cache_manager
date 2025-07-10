@@ -320,7 +320,10 @@ class AudioCacheManager {
     await entry.save();
 
     // For direct playback, convert the local file path to a file:// URI
-    return Uri.file(entry.localPath).toString();
+    AppLogger.info('DEBUG: Raw localPath from CacheEntry: ${entry.localPath}', name: 'AudioCacheManager');
+    final String uriString = Uri.file(entry.localPath).toString();
+    AppLogger.info('DEBUG: Formatted URI string (from Uri.file): $uriString', name: 'AudioCacheManager');
+    return uriString;
   }
 
   /// Checks if a track is present and valid in the cache.
