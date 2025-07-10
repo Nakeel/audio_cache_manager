@@ -288,7 +288,7 @@ class HlsCacheHandler {
 
     Future<void> manageSegmentTasks() async {
       while (activeSegmentTasks.isNotEmpty) {
-        final completed = await Future.any(activeSegmentTasks);
+        final completed =  Future.any(activeSegmentTasks);
         activeSegmentTasks.remove(completed);
         if (segmentTaskQueue.isNotEmpty) {
           activeSegmentTasks.add(segmentTaskQueue.removeFirst()());
