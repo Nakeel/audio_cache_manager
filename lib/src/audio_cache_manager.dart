@@ -1,18 +1,13 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:audio_cache_manager/handlers/hls_cache_handler.dart';
 import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
 import 'package:audio_cache_manager/handlers/mp3_cache_handler.dart';
 import 'package:audio_cache_manager/models/cache_entry.dart';
 import 'package:audio_cache_manager/storage/cache_metadata_store.dart';
-import 'package:audio_cache_manager/utils/aes_encryptor.dart';
 import 'package:audio_cache_manager/utils/app_logger.dart';
-import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:uuid/uuid.dart' show Uuid;
-
 
 class AudioCacheManager {
   static final AudioCacheManager _instance = AudioCacheManager._internal();
@@ -86,7 +81,7 @@ class AudioCacheManager {
     String? localPath;
     int? fileSize;
     String contentType;
-    String proxyUrl = '';
+    String proxyUrl = ''; // Initialize proxyUrl
 
     if (isHls) {
       final String? hlsLocalMasterManifestPath = await _hlsCacheHandler.cacheHls(
@@ -118,10 +113,10 @@ class AudioCacheManager {
       final newEntry = CacheEntry(
         trackId: trackId,
         originalUrl: originalUrl,
-        filePath: '',
+        filePath: '', // HLS doesn't have a single file path in this context
         timestamp: DateTime.now(),
         fileSize: hlsTotalSize,
-        isEncrypted: encrypt,
+        isEncrypted: encrypt, // HLS segments are decrypted on cache, but manifest might be served by proxy
         etag: '',
         lastModified: '',
         contentType: contentType,
@@ -133,7 +128,7 @@ class AudioCacheManager {
       await _metadataStore.save(newEntry);
       return proxyUrl;
 
-    } else {
+    } else { // MP3 caching logic
       final Map<String, dynamic>? mp3CacheResult = await _mp3CacheHandler.cacheAudio(
         originalUrl,
         trackId,
@@ -150,6 +145,12 @@ class AudioCacheManager {
       fileSize = mp3CacheResult['fileSize'] as int;
       contentType = 'audio/mpeg';
 
+      // If MP3 is encrypted, its playback URL MUST be through the proxy server.
+      if (encrypt) {
+        proxyUrl = _proxyServer.getProxyUrl(trackId);
+        AppLogger.info('Generated proxy URL for encrypted MP3 $trackId: $proxyUrl', name: 'AudioCacheManager');
+      }
+
       final newEntry = CacheEntry(
         trackId: trackId,
         originalUrl: originalUrl,
@@ -160,14 +161,15 @@ class AudioCacheManager {
         etag: '',
         lastModified: '',
         contentType: contentType,
-        proxyUrl: proxyUrl,
+        proxyUrl: proxyUrl, // This will be set for encrypted MP3s to force proxy playback
         isHls: false,
         hlsLocalPath: null,
         hlsManifestFilePath: null,
       );
       await _metadataStore.save(newEntry);
 
-      return localPath;
+      // Return the proxy URL if encrypted, else the local path
+      return encrypt ? proxyUrl : localPath;
     }
   }
 
@@ -189,9 +191,11 @@ class AudioCacheManager {
     }
 
     if (entry.isHls) {
+      // HLS content is always served via the proxy because the manifest and segments are local.
       return entry.proxyUrl;
     } else {
-      if (entry.proxyUrl.isNotEmpty) {
+      // For MP3s: if encrypted, it must be played via the proxy; otherwise, use the direct file path.
+      if (entry.isEncrypted && entry.proxyUrl.isNotEmpty) {
         return entry.proxyUrl;
       }
       return entry.filePath;
@@ -245,7 +249,7 @@ class AudioCacheManager {
     }
   }
 
-  /// **NEW:** Clears all cached audio files and their metadata.
+  /// Clears all cached audio files and their metadata.
   Future<void> clearAllCache() async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -287,7 +291,7 @@ class AudioCacheManager {
   }
 
 
-  /// **NEW:** Returns the number of currently cached audio items.
+  /// Returns the number of currently cached audio items.
   Future<int> getCachedItemCount() async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -296,7 +300,7 @@ class AudioCacheManager {
     return (await _metadataStore.getAll()).length;
   }
 
-  /// **NEW:** Returns the total size of currently cached audio items in bytes.
+  /// Returns the total size of currently cached audio items in bytes.
   Future<int> getCurrentCacheSize() async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
