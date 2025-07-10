@@ -11,278 +11,218 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 
-/// Custom cache manager for music tracks.
-/// Phase 1: Basic MP3 caching and direct playback.
 class AudioCacheManager {
-  // Singleton instance
   static final AudioCacheManager _instance = AudioCacheManager._internal();
+
   factory AudioCacheManager() => _instance;
-  AudioCacheManager._internal(); // Private constructor for singleton
 
-  // Dependencies
-  final CacheMetadataStore _metadataStore = CacheMetadataStore();
-  final Mp3CacheHandler _mp3Handler = Mp3CacheHandler();
+  AudioCacheManager._internal();
 
-  // Configuration (only relevant ones for Phase 1)
-  late final Duration expirationDuration;
-  late final int maxCacheSizeBytes;
-  late final String encryptionKey; // Placeholder for future
-  late final bool enableEncryption; // Will be false for this phase
-  late final LocalProxyServer _localProxyServer; // Will be a stub for this phase
+  late CacheMetadataStore _metadataStore;
+  late Mp3CacheHandler _mp3CacheHandler; // For MP3 download/cache
+  late LocalProxyServer _proxyServer; // For serving decrypted/cached files
 
-  // Internal flag to ensure init() is called only once successfully
   bool _isInitialized = false;
+  Duration expirationDuration = const Duration(days: 30);
+  int maxCacheSizeBytes = 100 * 1024 * 1024; // Default 100 MB
+  bool _enableEncryption = false; // Internal flag for encryption status
 
-  // Base directory for all cached files
-  late Directory _baseCacheDir;
+  String get cacheDirPath =>
+      _mp3CacheHandler.cacheDirPath; // Expose cache directory path
 
-  /// Configures the cache manager with provided settings.
-  /// Must be called before `init()` if custom settings are desired.
+
+  Future<void> init() async {
+    if (_isInitialized) return;
+
+    _metadataStore = CacheMetadataStore();
+    await _metadataStore.init();
+
+    _mp3CacheHandler = Mp3CacheHandler();
+    await _mp3CacheHandler
+        .init(); // Ensure MP3 handler is initialized to get cache path
+
+    _proxyServer = LocalProxyServer(
+      cacheDirPath: _mp3CacheHandler.cacheDirPath, // Pass cache path to proxy
+      metadataStore: _metadataStore, // Pass metadata store to proxy
+      // Add encryption helper here later when implemented
+    );
+    await _proxyServer.start(); // Start the local proxy server
+
+    await _cleanupCache(); // Initial cleanup
+    _isInitialized = true;
+    AppLogger.info(
+        'AudioCacheManager initialized. Cache path: ${cacheDirPath}');
+  }
+
   void configure({
     Duration? expirationDuration,
     int? maxCacheSizeBytes,
-    String? encryptionKey,
     bool? enableEncryption,
   }) {
-    this.expirationDuration = expirationDuration ?? const Duration(days: 30);
-    this.maxCacheSizeBytes = maxCacheSizeBytes ?? 2 * 1024 * 1024 * 1024; // 2GB
-    this.encryptionKey = encryptionKey ?? 'your-32-byte-secure-key-here-1234';
-    this.enableEncryption = enableEncryption ?? false; // Forces false for Phase 1
-    // Initialize LocalProxyServer here so it's ready, even if as a stub
-    _localProxyServer = LocalProxyServer(); // Initialize the stub for now
-    AESHelper.setEncryptionKey(this.encryptionKey); // Still set the key, even if not encrypting
-    AppLogger.info('AudioCacheManager configured. Encryption: ${this.enableEncryption}');
-  }
-
-  /// Initializes the cache manager.
-  /// Must be called once before using the cache manager.
-  Future<void> init() async {
     if (_isInitialized) {
-      AppLogger.info('AudioCacheManager already initialized. Skipping init().');
-      return;
+      AppLogger.warning(
+          'AudioCacheManager is already initialized. Configuration changes might not take full effect.');
     }
-
-    // Ensure configuration is set. If configure() wasn't called externally, call it now with defaults.
-    try {
-      // Access a late final field to check if configure() has run
-      // ignore: unnecessary_null_comparison
-      if (this.enableEncryption == null) {
-        configure();
-      }
-    } catch (_) {
-      configure();
-    }
-
-    // 1. Initialize base cache directory
-    _baseCacheDir = await getApplicationDocumentsDirectory();
-    _baseCacheDir = Directory(p.join(_baseCacheDir.path, 'audio_cache'));
-    if (!await _baseCacheDir.exists()) {
-      await _baseCacheDir.create(recursive: true);
-    }
-    AppLogger.info('AudioCacheManager: Base cache directory: ${_baseCacheDir.path}');
-
-    // 2. Initialize metadata store (Hive)
-    await _metadataStore.init();
-
-    // 3. Initialize proxy server (stubbed for this phase)
-    await _localProxyServer.init(
-      getCacheEntry: (trackId) => _metadataStore.get(trackId),
-      isUserSubscribed: () => false, // Not relevant for phase 1, can be false
-      isEncryptionEnabled: () => false, // Not relevant for phase 1, can be false
-    );
-
-
-    // 4. Perform initial cache cleanup (optional, but good practice)
-    await _cleanupCache();
-
-    _isInitialized = true;
-    AppLogger.info('AudioCacheManager initialized and ready.');
+    this.expirationDuration = expirationDuration ?? this.expirationDuration;
+    this.maxCacheSizeBytes = maxCacheSizeBytes ?? this.maxCacheSizeBytes;
+    this._enableEncryption = enableEncryption ?? this._enableEncryption;
+    AppLogger.info(
+        'AudioCacheManager configured: Expiration=${this.expirationDuration
+            .inDays} days, MaxSize=${(this.maxCacheSizeBytes / (1024 * 1024))
+            .toStringAsFixed(2)} MB, Encryption=${this._enableEncryption}');
   }
 
-  /// Caches an audio track (MP3 only for Phase 1).
-  /// Returns the trackId if successful, null otherwise.
-  Future<String?> cacheAudio(
-      String originalUrl,
+  /// Disposes resources held by the cache manager.
+  void dispose() {
+    if (_isInitialized) {
+      // _metadataStore.dispose();
+      _proxyServer.stop(); // Stop the proxy server
+      _isInitialized = false;
+      AppLogger.info('AudioCacheManager disposed.');
+    }
+  }
+
+  // Helper to determine if a URL is likely an HLS stream
+  bool _isHlsUrl(String url) {
+    // Basic check for .m3u8 extension. Can be expanded for other HLS indicators.
+    return url.toLowerCase().contains('.m3u8');
+  }
+
+
+  /// Caches an audio track and returns the local file URI for playback.
+  /// Returns null if caching fails or is not applicable.
+  // @override // Add this if it implements an interface
+  Future<String?> cacheAudio(String originalUrl,
       String trackId, {
         Function(int received, int total)? onProgress,
-      }) async {
+      }) async
+  {
     if (!_isInitialized) {
-      AppLogger.warning('AudioCacheManager is not initialized. Call init() first.');
+      AppLogger.warning(
+          'AudioCacheManager is not initialized. Call init() first.');
       return null;
     }
 
-    // For Phase 1, encryption is always false, and HLS is always false
-    const bool shouldEncrypt = false;
-    const bool isHls = false; // Always false for this phase
+    final bool isHls = _isHlsUrl(originalUrl); // Detect HLS
+    final bool shouldEncrypt = _enableEncryption &&
+        !isHls; // Only encrypt if not HLS
 
     try {
-      // Check if already cached and still valid (only based on metadata and existence)
+      // Check if already cached and still valid
       final existingEntry = await _metadataStore.get(trackId);
       if (existingEntry != null &&
-          !existingEntry.isHls && // Ensure it's not an HLS entry (relevant for future phases)
-          await File(existingEntry.localPath).exists() &&
-          DateTime.now().difference(existingEntry.cachedAt) < expirationDuration) {
-        // Also check if existing file size matches metadata (completeness check)
-        final int actualFileSize = await File(existingEntry.localPath).length();
-        if (actualFileSize == existingEntry.fileSize) {
-          AppLogger.info('Audio $trackId already cached and valid. Path: ${existingEntry.localPath}');
+          DateTime.now().difference(existingEntry.cachedAt) <
+              expirationDuration) {
+        // If it's an HLS entry, we just return the original URL (no local caching for HLS in Phase 2)
+        if (existingEntry.isHls) {
+          AppLogger.info(
+              'HLS track $trackId already present in metadata. Returning original URL: ${existingEntry
+                  .url}');
           existingEntry.updateAccessedTime();
           await existingEntry.save();
-          return Uri.file(existingEntry.localPath).toString();
+          return existingEntry.url;
+        }
+        // For non-HLS (MP3) files, proceed with file existence and size checks
+        else if (await File(existingEntry.localPath).exists()) {
+          final int actualFileSize = await File(existingEntry.localPath)
+              .length();
+          if (actualFileSize == existingEntry.fileSize &&
+              existingEntry.isEncrypted ==
+                  shouldEncrypt) { // Check encryption status matches configuration
+            AppLogger.info(
+                'Audio $trackId already cached and valid. Path: ${existingEntry
+                    .localPath}');
+            existingEntry.updateAccessedTime();
+            await existingEntry.save();
+            // If encrypted, return proxy URL; otherwise, return file:/// URI
+            return existingEntry.isEncrypted
+                ? 'http://localhost:${_proxyServer
+                .port}/audio/$trackId' // Use proxy for encrypted
+                : Uri
+                .file(existingEntry.localPath)
+                .toString(); // Direct file:/// for unencrypted
+          } else {
+            AppLogger.warning(
+                'Cache entry for $trackId found but file size/encryption mismatch. Re-downloading.');
+            await _cleanupPartialDownload(trackId, existingEntry.isHls);
+          }
         } else {
-          AppLogger.warning('Cache entry for $trackId found but file size mismatch. Re-downloading.');
-          await _cleanupPartialDownload(trackId, isHls); // Clean up inconsistent entry
+          AppLogger.warning(
+              'Cached file for $trackId missing on disk. Re-downloading.');
+          await _cleanupPartialDownload(
+              trackId, existingEntry.isHls); // Clean up inconsistent entry
         }
       }
 
-      // Proceed with download
-      final result = await _downloadMp3(originalUrl, trackId, shouldEncrypt, onProgress);
-
-      if (result != null) {
-        final String finalLocalPath = result['localPath'];
-        final int fileSize = result['fileSize'];
-
+      // If not cached, or cache invalid, proceed with download/metadata update
+      if (isHls) {
+        // For HLS, just create metadata entry, no download
         final newEntry = CacheEntry(
           trackId: trackId,
           url: originalUrl,
-          localPath: finalLocalPath,
+          localPath: originalUrl,
+          // Store original URL as localPath for HLS
           cachedAt: DateTime.now(),
           lastAccessedAt: DateTime.now(),
-          fileSize: fileSize,
-          isEncrypted: shouldEncrypt,
-          isHls: isHls,
+          fileSize: 0,
+          // HLS doesn't have a single file size
+          isEncrypted: false,
+          // HLS not encrypted by our system (streamed directly)
+          isHls: true,
         );
         await _metadataStore.save(newEntry);
-        AppLogger.info('Cached audio $trackId: ${newEntry.url} to ${newEntry.localPath}, Size: $fileSize bytes.');
-        return Uri.file(finalLocalPath).toString();
+        AppLogger.info(
+            'HLS track $trackId added to cache metadata. Will be streamed directly: $originalUrl');
+        return originalUrl; // Return original URL for HLS playback
+      } else {
+        // For MP3s, proceed with download and potentially encryption
+        final result = await _mp3CacheHandler.cacheAudio(
+            originalUrl, cacheDirPath, onProgress: onProgress,
+            encrypt: shouldEncrypt);
+
+        if (result != null) {
+          final String finalLocalPath = result['localPath'];
+          final int fileSize = result['fileSize'];
+
+          final newEntry = CacheEntry(
+            trackId: trackId,
+            url: originalUrl,
+            localPath: finalLocalPath,
+            cachedAt: DateTime.now(),
+            lastAccessedAt: DateTime.now(),
+            fileSize: fileSize,
+            isEncrypted: shouldEncrypt,
+            isHls: false, // Explicitly false for MP3s
+          );
+          await _metadataStore.save(newEntry);
+          AppLogger.info('Cached audio $trackId: ${newEntry.url} to ${newEntry
+              .localPath}, Size: $fileSize bytes. Encrypted: $shouldEncrypt');
+          // If encrypted, return proxy URL; otherwise, return file:/// URI
+          return shouldEncrypt
+              ? 'http://localhost:${_proxyServer
+              .port}/audio/$trackId' // Use proxy for encrypted
+              : Uri
+              .file(finalLocalPath)
+              .toString(); // Direct file:/// for unencrypted
+        }
+        return null;
       }
-      return null;
     } catch (e, st) {
-      AppLogger.error('Error in cacheAudio for $trackId: $e', error: e, stackTrace: st);
-      // Ensure partial downloads are cleaned up on error
+      AppLogger.error(
+          'Error in cacheAudio for $trackId: $e', error: e, stackTrace: st);
       await _cleanupPartialDownload(trackId, isHls);
       return null;
     } finally {
-      await _cleanupCache(); // Enforce limits after each caching operation
+      await _cleanupCache();
     }
   }
 
-  /// Handles cleanup of partial downloads (important for integrity).
-  Future<void> _cleanupPartialDownload(String trackId, bool isHlsType) async {
-    final entry = await _metadataStore.get(trackId); // Get current state
-    if (entry != null) {
-      final FileSystemEntity fileOrDir;
-      if (isHlsType) { // For HLS (future phase), it's a directory
-        fileOrDir = Directory(p.join(_baseCacheDir.path, trackId)); // Assuming HLS is trackId-named dir
-      } else { // For MP3, it's a file, could be .mp3 or .mp3.enc, or temporary
-        // Attempt to delete potential temporary and final files
-        final tempFile = File(p.join(_baseCacheDir.path, '$trackId.mp3.tmp'));
-        if (await tempFile.exists()) {
-          try {
-            await tempFile.delete();
-            AppLogger.info('Cleaned up temporary file: ${tempFile.path}');
-          } catch (e) {
-            AppLogger.error('Error deleting temp file ${tempFile.path}: $e');
-          }
-        }
-        final finalFile = File(p.join(_baseCacheDir.path, '$trackId.mp3')); // No .enc for phase 1
-        if (await finalFile.exists()) {
-          try {
-            await finalFile.delete();
-            AppLogger.info('Cleaned up final file: ${finalFile.path}');
-          } catch (e) {
-            AppLogger.error('Error deleting final file ${finalFile.path}: $e');
-          }
-        }
-      }
-
-      await _metadataStore.delete(trackId);
-      AppLogger.info('Cleaned up metadata for ${trackId} from Hive due to partial/inconsistent download.');
-    }
-  }
-
-
-  /// Downloads and saves an MP3 file with atomic write.
-  /// Returns localPath and fileSize if successful, null otherwise.
-  Future<Map<String, dynamic>?> _downloadMp3(
-      String url,
-      String trackId,
-      bool shouldEncrypt, // Will be false in this phase
-      Function(int received, int total)? onProgress,
-      ) async {
-    final String tempFileName = '$trackId.mp3.tmp'; // Use a temporary name
-    final File tempOutputFile = File(p.join(_baseCacheDir.path, tempFileName));
-    final String finalFileName = '$trackId.mp3';
-    final File finalOutputFile = File(p.join(_baseCacheDir.path, finalFileName));
-
-    // Ensure no old temp file exists
-    if (await tempOutputFile.exists()) {
-      await tempOutputFile.delete();
-    }
-    // Ensure no old final file exists (if re-downloading)
-    if (await finalOutputFile.exists()) {
-      await finalOutputFile.delete();
-    }
-
-
-    try {
-      final Uint8List? downloadedBytes = await _mp3Handler.downloadMp3Bytes(url, onProgress: onProgress);
-
-      if (downloadedBytes == null) {
-        AppLogger.warning('MP3 download failed for $trackId from $url.');
-        return null;
-      }
-
-      // No encryption in Phase 1, so bytesToSave is simply downloadedBytes
-      Uint8List bytesToSave = downloadedBytes;
-
-      // Write to temporary file
-      await tempOutputFile.writeAsBytes(bytesToSave);
-      AppLogger.info('MP3 $trackId downloaded to temporary file: ${tempOutputFile.path}');
-
-      // Verify file size after download to ensure completeness
-      final int actualTempFileSize = await tempOutputFile.length();
-      if (actualTempFileSize != downloadedBytes.length) {
-        AppLogger.error('MP3 download size mismatch for $trackId! Expected ${downloadedBytes.length}, got $actualTempFileSize');
-        await tempOutputFile.delete(); // Delete incomplete temp file
-        return null;
-      }
-
-      // If complete, move/rename to final destination (atomic operation)
-      await tempOutputFile.rename(finalOutputFile.path);
-      final int finalFileSize = await finalOutputFile.length(); // Get final size
-
-      AppLogger.info('MP3 $trackId saved to ${finalOutputFile.path}, size: $finalFileSize bytes.');
-      return {
-        'localPath': finalOutputFile.path,
-        'fileSize': finalFileSize,
-      };
-    } catch (e, st) {
-      AppLogger.error('Error during _downloadMp3 for $trackId: $e', error: e, stackTrace: st);
-      // Ensure temp file is deleted on any error
-      if (await tempOutputFile.exists()) {
-        await tempOutputFile.delete();
-      }
-      return null;
-    }
-  }
-
-  // Placeholder for HLS download (not used in Phase 1)
-  Future<Map<String, dynamic>?> _downloadHls(
-      String m3u8Url,
-      String trackId,
-      bool shouldEncrypt,
-      Function(int received, int total)? onProgress,
-      ) async {
-    AppLogger.warning('_downloadHls not implemented for Phase 1.');
-    return null;
-  }
-
-  /// Gets the playback URL for a cached audio track (direct file path for Phase 1 MP3s).
+  /// Gets the playback URL for a cached audio track (direct file path or proxy URL).
   /// Returns null if the track is not cached or invalid.
   Future<String?> getPlaybackUrl(String trackId) async {
     if (!_isInitialized) {
-      AppLogger.warning('AudioCacheManager is not initialized. Call init() first.');
+      AppLogger.warning(
+          'AudioCacheManager is not initialized. Call init() first.');
       return null;
     }
 
@@ -293,15 +233,21 @@ class AudioCacheManager {
       return null;
     }
 
-    // For Phase 1, we only handle non-HLS, non-encrypted files.
-    if (entry.isHls || entry.isEncrypted) {
-      AppLogger.warning('Track $trackId is HLS or encrypted. Not supported in Phase 1 for direct playback.');
-      return null;
+    // Handle HLS streams: always return original URL for direct streaming
+    if (entry.isHls) {
+      AppLogger.info(
+          'Track $trackId is HLS. Returning original URL for direct streaming: ${entry
+              .url}');
+      entry.updateAccessedTime();
+      await entry.save();
+      return entry.url;
     }
 
+    // For non-HLS (MP3) files, proceed with local file checks
     final File file = File(entry.localPath);
     if (!await file.exists()) {
-      AppLogger.info('Files for $trackId missing on disk. Cleaning up metadata.');
+      AppLogger.info(
+          'Files for $trackId missing on disk. Cleaning up metadata.');
       await _metadataStore.delete(trackId);
       return null;
     }
@@ -309,7 +255,9 @@ class AudioCacheManager {
     // Verify file integrity (size match)
     final int actualFileSize = await file.length();
     if (actualFileSize != entry.fileSize) {
-      AppLogger.warning('Cached file size mismatch for $trackId. Metadata: ${entry.fileSize}, Actual: $actualFileSize. Recommending re-download.');
+      AppLogger.warning(
+          'Cached file size mismatch for $trackId. Metadata: ${entry
+              .fileSize}, Actual: $actualFileSize. Recommending re-download.');
       await _metadataStore.delete(trackId); // Invalidate metadata
       await file.delete(); // Delete corrupted file
       return null;
@@ -319,153 +267,148 @@ class AudioCacheManager {
     entry.updateAccessedTime();
     await entry.save();
 
-    // For direct playback, convert the local file path to a file:// URI
-    AppLogger.info('DEBUG: Raw localPath from CacheEntry: ${entry.localPath}', name: 'AudioCacheManager');
-    final String uriString = Uri.file(entry.localPath).toString();
-    AppLogger.info('DEBUG: Formatted URI string (from Uri.file): $uriString', name: 'AudioCacheManager');
-    return uriString;
+    // For encrypted files, return the proxy URL
+    if (entry.isEncrypted) {
+      AppLogger.info(
+          'Track $trackId is encrypted. Returning proxy URL: http://localhost:${_proxyServer
+              .port}/audio/$trackId');
+      return 'http://localhost:${_proxyServer.port}/audio/$trackId';
+    } else {
+      // For unencrypted direct playback, convert the local file path to a file:// URI
+      AppLogger.info(
+          'Track $trackId is unencrypted. Returning direct file:// URI: ${Uri
+              .file(entry.localPath).toString()}');
+      return Uri.file(entry.localPath).toString();
+    }
   }
 
-  /// Checks if a track is present and valid in the cache.
-  /// Includes file existence and integrity check.
-  Future<bool> isAudioCached(String trackId) async {
-    if (!_isInitialized) {
-      AppLogger.warning('AudioCacheManager is not initialized. Call init() first.');
-      return false;
-    }
-
-    final entry = await _metadataStore.get(trackId);
-    if (entry == null) return false;
-
-    // For Phase 1, we only check for non-HLS, non-encrypted MP3s.
-    if (entry.isHls || entry.isEncrypted) {
-      AppLogger.warning('isAudioCached for $trackId: Track is HLS or encrypted. Not supported in Phase 1.');
-      return false;
-    }
-
-    final File file = File(entry.localPath);
-    if (!await file.exists()) {
-      AppLogger.info('isAudioCached: Files for $trackId missing on disk. Cleaning up metadata.');
-      await _metadataStore.delete(trackId);
-      return false;
-    }
-
-    // Verify file integrity (size match)
-    final int actualFileSize = await file.length();
-    if (actualFileSize != entry.fileSize) {
-      AppLogger.warning('isAudioCached: Cached file size mismatch for $trackId. Inconsistent. Removing.');
-      await _metadataStore.delete(trackId); // Invalidate metadata
-      await file.delete(); // Delete corrupted file
-      return false;
-    }
-
-    final bool notExpired = DateTime.now().difference(entry.cachedAt) < expirationDuration;
-
-    return notExpired;
+  // --- Utility methods (existing) ---
+  // The _downloadMp3 method below is a placeholder and should be removed
+  // as its functionality is now encapsulated within Mp3CacheHandler.cacheAudio.
+  Future<void> _downloadMp3(String url, String trackId, bool encrypt,
+      Function(int received, int total)? onProgress) async {
+    throw UnimplementedError(
+        'This method should be handled by Mp3CacheHandler and is no longer directly used by AudioCacheManager.');
   }
 
-  /// Clears a specific track from cache (files and metadata).
+  Future<void> _cleanupCache() async {
+    // Implement your cache cleanup logic here, e.g., LRU eviction based on maxCacheSizeBytes
+    AppLogger.info('Performing cache cleanup...');
+    final allEntries = await _metadataStore.getAll();
+    List<CacheEntry> mp3Entries = allEntries
+        .where((entry) => !entry.isHls)
+        .toList();
+
+    // Sort by last accessed time (oldest first)
+    mp3Entries.sort((a, b) => a.lastAccessedAt.compareTo(b.lastAccessedAt));
+
+    int currentCacheSize = 0;
+    for (var entry in mp3Entries) {
+      final file = File(entry.localPath);
+      if (await file.exists()) {
+        currentCacheSize += await file.length();
+      } else {
+        // If file doesn't exist, remove its metadata entry
+        await _metadataStore.delete(entry.trackId);
+        AppLogger.warning(
+            'Missing file for cache entry ${entry.trackId}. Metadata removed.');
+      }
+    }
+
+    // Evict oldest files if cache exceeds max size
+    for (var entry in mp3Entries) {
+      if (currentCacheSize > maxCacheSizeBytes) {
+        final file = File(entry.localPath);
+        if (await file.exists()) {
+          try {
+            await file.delete();
+            currentCacheSize -= entry.fileSize;
+            await _metadataStore.delete(entry.trackId);
+            AppLogger.info(
+                'Evicted cached file: ${entry.localPath} (Size: ${entry
+                    .fileSize} bytes)');
+          } catch (e) {
+            AppLogger.error('Failed to evict file ${entry.localPath}: $e');
+          }
+        }
+      } else {
+        break; // Stop if cache is within limits
+      }
+    }
+    AppLogger.info('Cache cleanup complete. Current size: ${(currentCacheSize /
+        (1024 * 1024)).toStringAsFixed(2)} MB');
+  }
+
   Future<void> clearAudioCache(String trackId) async {
     if (!_isInitialized) {
-      AppLogger.warning('AudioCacheManager is not initialized. Call init() first.');
+      AppLogger.warning('AudioCacheManager is not initialized.');
       return;
     }
     final entry = await _metadataStore.get(trackId);
     if (entry != null) {
-      await _deleteCachedItem(entry);
-      AppLogger.info('Cleared cache for track: $trackId');
-    } else {
-      AppLogger.info('Track $trackId not found in cache to clear.');
+      if (!entry.isHls) { // Only delete local file if it's not HLS
+        final file = File(entry.localPath);
+        if (await file.exists()) {
+          try {
+            await file.delete();
+            AppLogger.info(
+                'Deleted cached file for $trackId: ${entry.localPath}');
+          } catch (e) {
+            AppLogger.error('Failed to delete cached file for $trackId: ${entry
+                .localPath}, Error: $e');
+          }
+        }
+      }
+      await _metadataStore.delete(trackId);
+      AppLogger.info('Deleted cache metadata for $trackId.');
     }
   }
 
-  /// Clears all cached files and metadata.
-  Future<void> clearAllCache() async {
+  Future<bool> isAudioCached(String trackId) async {
     if (!_isInitialized) {
-      AppLogger.warning('AudioCacheManager is not initialized. Call init() first.');
-      return;
+      AppLogger.warning(
+          'AudioCacheManager is not initialized. Call init() first.');
+      return false;
     }
-    AppLogger.info('Clearing all cache (files and metadata)...');
-    await _metadataStore.clear();
+    final CacheEntry? entry = await _metadataStore.get(trackId);
+    if (entry == null) {
+      return false;
+    }
 
-    if (await _baseCacheDir.exists()) {
-      try {
-        await _baseCacheDir.delete(recursive: true);
-        await _baseCacheDir.create(recursive: true);
-        AppLogger.info('All cached files deleted from disk.');
-      } catch (e, st) {
-        AppLogger.error('Error deleting base cache directory: $e', error: e, stackTrace: st);
-      }
+    // For HLS entries, just check if metadata exists
+    if (entry.isHls) {
+      return true;
     }
-    AppLogger.info('All custom cache cleared.');
+
+    // For non-HLS, check file existence and validity
+    if (!await File(entry.localPath).exists()) {
+      await _metadataStore.delete(trackId); // Clean up stale metadata
+      return false;
+    }
+    // Optionally check file size match here as well for full integrity
+    return true;
   }
 
-  /// Enforce cache size and duration limits.
-  Future<void> _cleanupCache() async {
-    final allEntries = await _metadataStore.getAll();
-    final now = DateTime.now();
-
-    // 1. Remove expired files first and inconsistent files
-    for (final entry in allEntries) {
-      final File file = File(entry.localPath);
-      bool exists = await file.exists();
-      int actualSize = exists ? await file.length() : 0;
-
-      if (now.difference(entry.cachedAt) > expirationDuration || !exists || actualSize != entry.fileSize) {
-        String reason = '';
-        if (now.difference(entry.cachedAt) > expirationDuration) reason = 'expired';
-        else if (!exists) reason = 'missing file';
-        else if (actualSize != entry.fileSize) reason = 'size mismatch';
-
-        AppLogger.info('Deleting item: ${entry.trackId} because $reason.');
-        await _deleteCachedItem(entry);
+  Future<void> _cleanupPartialDownload(String trackId, bool isHls) async {
+    final entry = await _metadataStore.get(trackId);
+    if (entry != null) {
+      if (!isHls) { // Only attempt to delete local file if it's not HLS
+        final file = File(entry.localPath);
+        if (await file.exists()) {
+          try {
+            await file.delete();
+            AppLogger.info(
+                'Cleaned up partial download file for $trackId: ${entry
+                    .localPath}');
+          } catch (e) {
+            AppLogger.error(
+                'Failed to delete partial download file for $trackId: ${entry
+                    .localPath}, Error: $e');
+          }
+        }
       }
+      await _metadataStore.delete(trackId);
+      AppLogger.info('Cleaned up partial download metadata for $trackId.');
     }
-
-    int currentTotalSize = _metadataStore.getCurrentCacheSize();
-
-    // 2. Enforce size limit (LRU - Least Recently Used)
-    if (currentTotalSize > maxCacheSizeBytes) {
-      final List<CacheEntry> sortedItems = await _metadataStore.getAll();
-      sortedItems.sort((a, b) => a.lastAccessedAt.compareTo(b.lastAccessedAt));
-
-      for (final entry in sortedItems) {
-        if (currentTotalSize <= maxCacheSizeBytes) break;
-        AppLogger.info('Deleting LRU item: ${entry.trackId} (Last accessed: ${entry.lastAccessedAt}, Current size: ${currentTotalSize / (1024 * 1024)} MB)');
-        await _deleteCachedItem(entry);
-        currentTotalSize = _metadataStore.getCurrentCacheSize();
-      }
-      AppLogger.info('Cache size enforced. Final size: ${currentTotalSize / (1024 * 1024)} MB.');
-    }
-  }
-
-  /// Helper to delete a cached item (files + metadata).
-  Future<void> _deleteCachedItem(CacheEntry entry) async {
-    final FileSystemEntity fileOrDir;
-    // Handle both file and directory types for deletion
-    if (entry.isHls) { // HLS is a directory
-      fileOrDir = Directory(entry.localPath);
-    } else { // MP3 is a file
-      fileOrDir = File(entry.localPath);
-    }
-
-    if (await fileOrDir.exists()) {
-      try {
-        await fileOrDir.delete(recursive: true);
-        AppLogger.info('Deleted files for ${entry.trackId} from disk.');
-      } catch (e, st) {
-        AppLogger.error('Error deleting files for ${entry.trackId}: $e', error: e, stackTrace: st);
-      }
-    }
-    await _metadataStore.delete(entry.trackId); // Use trackId for deletion, not entry.delete()
-    AppLogger.info('Deleted metadata for ${entry.trackId} from Hive.');
-  }
-
-  /// Disposes resources held by the cache manager.
-  Future<void> dispose() async {
-    await _metadataStore.close(); // Close Hive box
-    // _localProxyServer.dispose() will be called in later phases
-    _isInitialized = false;
-    AppLogger.info('AudioCacheManager disposed.');
   }
 }

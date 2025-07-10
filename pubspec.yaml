@@ -24,6 +24,7 @@ dependencies:
   # For local HTTP server (Crucial for HLS proxy)
   shelf: ^1.4.2
   hive_flutter: ^1.1.0
+  shelf_router: ^1.1.4
 #  shelf_io: any
 
 
