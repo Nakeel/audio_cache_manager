@@ -188,6 +188,7 @@ class AudioCacheManager {
           proxyUrl: '',
           isHls: true,
           hlsLocalPath: hlsCacheDirPath, // Store the DIRECTORY path here
+          hlsManifestFilePath: localManifestFilePath
         );
 
         AppLogger.info('Creating new CacheEntry for HLS. hlsLocalPath: "${newEntry.hlsLocalPath}"', name: 'APP');
@@ -272,22 +273,60 @@ class AudioCacheManager {
       return null;
     }
 
+    // if (entry.isHls) {
+    //   if (entry.hlsLocalPath == null || !await Directory(entry.hlsLocalPath!).exists()) {
+    //     AppLogger.warning('HLS local path for $trackId is invalid or missing. Clearing metadata.', name: 'APP');
+    //     await _metadataStore.delete(trackId);
+    //     return null;
+    //   }
+    //   AppLogger.info('Track $trackId is HLS. Returning local manifest: ${entry.hlsLocalPath}', name: 'APP');
+    //   return entry.hlsLocalPath;
+    // } else {
+    //   if (!await File(entry.filePath).exists()) {
+    //     AppLogger.warning('File for $trackId does not exist at ${entry.filePath}. Clearing metadata.', name: 'APP');
+    //     await _metadataStore.delete(trackId);
+    //     return null;
+    //   }
+    //   AppLogger.info('Track $trackId is MP3. Returning proxy URL: ${entry.proxyUrl}', name: 'APP');
+    //   return entry.proxyUrl;
+    // }
+
     if (entry.isHls) {
-      if (entry.hlsLocalPath == null || !await Directory(entry.hlsLocalPath!).exists()) {
-        AppLogger.warning('HLS local path for $trackId is invalid or missing. Clearing metadata.', name: 'APP');
-        await _metadataStore.delete(trackId);
-        return null;
+      if (entry.hlsManifestFilePath != null) {
+        final File manifestFile = File(entry.hlsManifestFilePath!);
+        if (await manifestFile.exists()) {
+          AppLogger.info('Track $trackId is HLS. Returning local manifest: ${entry.hlsManifestFilePath}', name: 'APP');
+          return 'file://${entry.hlsManifestFilePath}'; // <--- THIS IS THE FIX
+        } else {
+          AppLogger.warning('HLS manifest file missing for $trackId at ${entry.hlsManifestFilePath}. Invalidating cache entry.', name: 'APP');
+          await _metadataStore.delete(trackId); // Invalidate corrupted entry
+          // Optional: Delete the directory
+          final Directory trackDir = Directory(entry.hlsLocalPath!);
+          if (await trackDir.exists()) {
+            await trackDir.delete(recursive: true);
+          }
+          return null;
+        }
       }
-      AppLogger.info('Track $trackId is HLS. Returning local manifest: ${entry.hlsLocalPath}', name: 'APP');
-      return entry.hlsLocalPath;
     } else {
-      if (!await File(entry.filePath).exists()) {
-        AppLogger.warning('File for $trackId does not exist at ${entry.filePath}. Clearing metadata.', name: 'APP');
-        await _metadataStore.delete(trackId);
-        return null;
+      if (entry.filePath.isEmpty) {
+        final File cachedFile = File(entry.filePath);
+        if (await cachedFile.exists() &&
+            await cachedFile.length() == entry.fileSize) {
+          AppLogger.info(
+              'Found valid cached MP3 for $trackId at ${entry.filePath}',
+              name: 'APP');
+          return 'file://${entry.filePath}';
+        } else {
+          AppLogger.warning(
+              'Cached MP3 file for $trackId is missing or corrupted. Deleting entry.',
+              name: 'APP');
+          await _metadataStore.delete(trackId);
+          return null;
+        }
       }
-      AppLogger.info('Track $trackId is MP3. Returning proxy URL: ${entry.proxyUrl}', name: 'APP');
-      return entry.proxyUrl;
+        AppLogger.info('Track $trackId is MP3. Returning proxy URL: ${entry.proxyUrl}', name: 'APP');
+        return entry.proxyUrl;
     }
   }
 

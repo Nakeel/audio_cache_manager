@@ -29,13 +29,14 @@ class CacheEntryAdapter extends TypeAdapter<CacheEntry> {
       proxyUrl: fields[9] as String,
       isHls: fields[10] as bool,
       hlsLocalPath: fields[11] as String?,
+      hlsManifestFilePath: fields[12] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, CacheEntry obj) {
     writer
-      ..writeByte(12)
+      ..writeByte(13)
       ..writeByte(0)
       ..write(obj.trackId)
       ..writeByte(1)
@@ -59,7 +60,9 @@ class CacheEntryAdapter extends TypeAdapter<CacheEntry> {
       ..writeByte(10)
       ..write(obj.isHls)
       ..writeByte(11)
-      ..write(obj.hlsLocalPath);
+      ..write(obj.hlsLocalPath)
+      ..writeByte(12)
+      ..write(obj.hlsManifestFilePath);
   }
 
   @override

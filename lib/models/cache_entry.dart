@@ -41,6 +41,8 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
 
   @HiveField(11)
   final String? hlsLocalPath; // Path to the local rewritten .m3u8 manifest file / HLS directory
+  @HiveField(12)
+  final String? hlsManifestFilePath;
 
   CacheEntry({
     required this.trackId,
@@ -56,6 +58,7 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
     // Initialize new fields
     this.isHls = false,
     this.hlsLocalPath,
+    this.hlsManifestFilePath
   });
 
   // copyWith method to create a new instance with updated fields
@@ -72,6 +75,7 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
     String? proxyUrl,
     bool? isHls,
     String? hlsLocalPath,
+     String? hlsManifestFilePath,
   }) {
     return CacheEntry(
       trackId: trackId ?? this.trackId,
@@ -86,6 +90,7 @@ class CacheEntry extends HiveObject { // Extend HiveObject if you want to use me
       proxyUrl: proxyUrl ?? this.proxyUrl,
       isHls: isHls ?? this.isHls,
       hlsLocalPath: hlsLocalPath ?? this.hlsLocalPath,
+      hlsManifestFilePath: hlsManifestFilePath ?? this.hlsManifestFilePath
     );
   }
 
