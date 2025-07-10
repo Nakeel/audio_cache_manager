@@ -1,14 +1,20 @@
 import 'dart:io';
+import 'dart:typed_data' show Uint8List;
+import 'package:audio_cache_manager/utils/aes_encryptor.dart';
 import 'package:audio_cache_manager/utils/app_logger.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'dart:async';
+import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
 
 class HlsCacheHandler {
-
   static const int _maxSegmentRetries = 3;
   static const Duration _retryDelay = Duration(seconds: 2);
-  // Concurrency limits removed as we are going sequential
+
+  final LocalProxyServer _proxyServer; // Add this line
+
+  // Modify the constructor to accept LocalProxyServer
+  HlsCacheHandler({required LocalProxyServer proxyServer}) : _proxyServer = proxyServer;
 
   /// Caches an HLS stream, downloading a single chosen variant and its segments sequentially.
   /// Returns the local path to the rewritten master manifest.
@@ -20,6 +26,7 @@ class HlsCacheHandler {
       String cacheBaseDirPath,
       String trackId, {
         Function(int received, int total)? onProgress,
+        bool encrypt = false, // Add encrypt parameter here
       }) async {
     AppLogger.info('Attempting to cache SINGLE HLS variant sequentially: $hlsUrl for track $trackId', name: 'HlsCacheHandler');
 
@@ -34,306 +41,183 @@ class HlsCacheHandler {
       }
 
       // 1. Download Master Manifest
-      AppLogger.info('Downloading HLS master manifest from $hlsUrl', name: 'HlsCacheHandler');
+      AppLogger.info('Downloading master manifest from $hlsUrl', name: 'HlsCacheHandler');
       final http.Response masterManifestResponse = await http.get(hlsUri);
       if (masterManifestResponse.statusCode != 200) {
-        throw Exception('Failed to download HLS master manifest: ${masterManifestResponse.statusCode}');
+        AppLogger.error('Failed to download master manifest: ${masterManifestResponse.statusCode}', name: 'HlsCacheHandler');
+        throw Exception('Failed to download master manifest');
       }
 
-      final String masterManifestContent = masterManifestResponse.body;
-      final List<String> masterManifestOriginalLines = masterManifestContent.split('\n');
+      String masterManifestContent = masterManifestResponse.body;
+      Uri baseUri = hlsUri; // Base URI for resolving relative paths in manifest
 
-      // 2. Parse Master Manifest to select the SMALLEST Bandwidth Variant and its Associated Audio
-      String? selectedVideoVariantRelativeUri;
-      String? selectedVideoVariantAbsoluteUrl;
-      int minBandwidth = 2147483647; // Initialize with Dart's max int value
+      // Parse master manifest to find variants
+      List<String> mediaPlaylistUrls = [];
+      List<String> lines = masterManifestContent.split('\n');
+      for (int i = 0; i < lines.length; i++) {
+        String line = lines[i].trim();
+        if (line.startsWith('#EXT-X-STREAM-INF')) {
+          // This line describes a variant stream
+          // Find the URI on the next line
+          if (i + 1 < lines.length) {
+            String uriLine = lines[i + 1].trim();
+            if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
+              mediaPlaylistUrls.add(uriLine);
+            }
+          }
+        }
+      }
 
-      String? selectedAudioRelativeUri; // For separate audio streams
-      String? selectedAudioAbsoluteUrl;
-      String? selectedAudioGroupId; // To link audio to video variant
+      if (mediaPlaylistUrls.isEmpty) {
+        // If no stream-inf found, assume it's a media playlist directly (single variant)
+        AppLogger.info('No EXT-X-STREAM-INF found, assuming single media playlist.', name: 'HlsCacheHandler');
+        mediaPlaylistUrls.add(hlsUrl); // Treat the original URL as the media playlist
+      }
 
-      final RegExp streamInfPattern = RegExp(r'^#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+).*(RESOLUTION=(\d+x\d+))?.*(AUDIO="([^"]+)")?.*', multiLine: true);
-      final RegExp mediaInfPattern = RegExp(r'^#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="([^"]+)".*URI="([^"]+)".*(DEFAULT=(YES|NO))?', multiLine: true);
-      final RegExp subtitleMediaInfPattern = RegExp(r'^#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="([^"]+)".*URI="([^"]+)".*(DEFAULT=(YES|NO))?', multiLine: true);
+      String? selectedMediaPlaylistUrl;
+      // For simplicity, select the first media playlist found
+      if (mediaPlaylistUrls.isNotEmpty) {
+        selectedMediaPlaylistUrl = _resolveUri(baseUri, mediaPlaylistUrls.first).toString();
+        AppLogger.info('Selected media playlist: $selectedMediaPlaylistUrl', name: 'HlsCacheHandler');
+      } else {
+        AppLogger.error('No media playlists found in master manifest.', name: 'HlsCacheHandler');
+        throw Exception('No media playlists found');
+      }
 
-      // First pass: Identify smallest bandwidth video variant
-      for (int i = 0; i < masterManifestOriginalLines.length; i++) {
-        final String currentLine = masterManifestOriginalLines[i].trim();
+      // 2. Download Media Playlist (the chosen variant's playlist)
+      AppLogger.info('Downloading media playlist from $selectedMediaPlaylistUrl', name: 'HlsCacheHandler');
+      final http.Response mediaPlaylistResponse = await http.get(Uri.parse(selectedMediaPlaylistUrl));
+      if (mediaPlaylistResponse.statusCode != 200) {
+        AppLogger.error('Failed to download media playlist: ${mediaPlaylistResponse.statusCode}', name: 'HlsCacheHandler');
+        throw Exception('Failed to download media playlist');
+      }
 
-        if (streamInfPattern.hasMatch(currentLine)) {
-          final Match? streamMatch = streamInfPattern.firstMatch(currentLine);
-          if (streamMatch != null) {
-            final int bandwidth = int.parse(streamMatch.group(1)!);
-            final String? audioGroupId = streamMatch.group(5); // Capture the AUDIO="group_id" part
+      String mediaPlaylistContent = mediaPlaylistResponse.body;
+      Uri mediaPlaylistBaseUri = Uri.parse(selectedMediaPlaylistUrl); // Base URI for resolving segments
 
-            if (bandwidth < minBandwidth) { // Logic changed to select smallest bandwidth
-              minBandwidth = bandwidth;
-              if (i + 1 < masterManifestOriginalLines.length) {
-                final String nextLine = masterManifestOriginalLines[i + 1].trim();
-                if (!nextLine.startsWith('#') && nextLine.endsWith('.m3u8')) {
-                  selectedVideoVariantRelativeUri = nextLine;
-                  selectedVideoVariantAbsoluteUrl = _resolveUri(hlsUri, nextLine).toString();
-                  selectedAudioGroupId = audioGroupId; // Store associated audio group ID
-                  AppLogger.info('Found new smallest video variant (BANDWIDTH: $bandwidth): $selectedVideoVariantAbsoluteUrl', name: 'HlsCacheHandler');
-                }
+      // 3. Download Segments sequentially and rewrite media playlist
+      List<String> segmentUrls = [];
+      String rewrittenMediaPlaylistContent = '';
+      int totalSegments = 0;
+      int downloadedSegments = 0;
+
+      List<String> mediaPlaylistLines = mediaPlaylistContent.split('\n');
+      for (String line in mediaPlaylistLines) {
+        String trimmedLine = line.trim();
+        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+          // This is a segment URI
+          segmentUrls.add(_resolveUri(mediaPlaylistBaseUri, trimmedLine).toString());
+          totalSegments++;
+        }
+      }
+
+      // Track progress for segments
+      int currentProgress = 0;
+      int segmentTotalBytes = 0; // Total bytes for all segments (if known)
+      if (onProgress != null) {
+        // We can't know total bytes for all segments upfront,
+        // so we'll report progress based on segment count
+        segmentTotalBytes = totalSegments;
+      }
+
+
+      for (String segmentUrl in segmentUrls) {
+        AppLogger.info('Downloading segment: $segmentUrl', name: 'HlsCacheHandler');
+        final Uri segmentUri = Uri.parse(segmentUrl);
+        final String segmentFileName = p.basename(segmentUri.path);
+        final File segmentFile = File(p.join(hlsCacheDirPath, segmentFileName));
+
+        bool segmentDownloaded = false;
+        for (int retry = 0; retry < _maxSegmentRetries; retry++) {
+          try {
+            final http.Response segmentResponse = await http.get(segmentUri);
+            if (segmentResponse.statusCode == 200) {
+              Uint8List segmentBytes = segmentResponse.bodyBytes;
+
+              if (encrypt) {
+                AppLogger.info('Encrypting HLS segment: $segmentFileName for track $trackId', name: 'HlsCacheHandler');
+                segmentBytes = AESHelper.encrypt(segmentBytes); // Encrypt segment bytes
               }
+
+              await segmentFile.writeAsBytes(segmentBytes);
+              AppLogger.info('Saved segment: ${segmentFile.path}', name: 'HlsCacheHandler');
+              segmentDownloaded = true;
+              break; // Segment downloaded successfully
+            } else {
+              AppLogger.warning('Failed to download segment ${segmentFile.path}: ${segmentResponse.statusCode}. Retrying...', name: 'HlsCacheHandler');
+            }
+          } catch (e, st) {
+            AppLogger.error('Error downloading segment ${segmentFile.path}: $e. Retrying...', error: e, stackTrace: st, name: 'HlsCacheHandler');
+          }
+          await Future.delayed(_retryDelay);
+        }
+
+        if (!segmentDownloaded) {
+          AppLogger.error('Failed to download segment after $_maxSegmentRetries retries: $segmentUrl', name: 'HlsCacheHandler');
+          throw Exception('Failed to download segment: $segmentUrl');
+        }
+
+        // Increment progress for each successful segment download
+        downloadedSegments++;
+        if (onProgress != null) {
+          onProgress(downloadedSegments, totalSegments);
+        }
+      }
+
+      // Rewrite manifest to point to proxy URLs
+      String rewrittenMasterManifestContent = masterManifestContent;
+
+      // HLS Master manifest usually contains variants which are media playlists
+      // We need to rewrite these media playlist URLs to point to the proxy
+      for (int i = 0; i < lines.length; i++) {
+        String line = lines[i].trim();
+        if (line.startsWith('#EXT-X-STREAM-INF')) {
+          if (i + 1 < lines.length) {
+            String uriLine = lines[i + 1].trim();
+            if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
+              // Construct proxy URL for the media playlist
+              final String mediaPlaylistFileName = p.basename(Uri.parse(uriLine).path);
+              final String proxyMediaPlaylistUrl = _proxyServer.getHlsManifestProxyUrl(trackId, mediaPlaylistFileName);
+
+              // Replace the original URI with the proxy URI in the content
+              rewrittenMasterManifestContent = rewrittenMasterManifestContent.replaceAll(uriLine, proxyMediaPlaylistUrl);
+              AppLogger.info('Rewrote master manifest line: $uriLine to $proxyMediaPlaylistUrl', name: 'HlsCacheHandler');
             }
           }
         }
       }
 
-      // Second pass: Find default/best audio for the selected video variant (if an audio group was linked)
-      if (selectedAudioGroupId != null) {
-        final Map<String, String> audioTracksInGroup = {};
-        String? defaultAudioUri;
-        String? defaultAudioAbsoluteUrl;
 
-        for (final line in masterManifestOriginalLines) {
-          final String trimmedLine = line.trim();
-          final Match? mediaMatch = mediaInfPattern.firstMatch(trimmedLine);
-          if (mediaMatch != null) {
-            final String groupId = mediaMatch.group(1)!;
-            final String audioUri = mediaMatch.group(2)!;
-            final String isDefault = mediaMatch.group(4) ?? 'NO';
-
-            if (groupId == selectedAudioGroupId) {
-              final String absoluteAudioUrl = _resolveUri(hlsUri, audioUri).toString();
-              audioTracksInGroup[audioUri] = absoluteAudioUrl;
-              if (isDefault == 'YES') {
-                defaultAudioUri = audioUri;
-                defaultAudioAbsoluteUrl = absoluteAudioUrl;
-                AppLogger.info('Found default audio for group $selectedAudioGroupId: $absoluteAudioUrl', name: 'HlsCacheHandler');
-              }
-            }
-          }
-        }
-        if (defaultAudioUri != null) {
-          selectedAudioRelativeUri = defaultAudioUri;
-          selectedAudioAbsoluteUrl = defaultAudioAbsoluteUrl;
-        } else if (audioTracksInGroup.isNotEmpty) {
-          selectedAudioRelativeUri = audioTracksInGroup.keys.first;
-          selectedAudioAbsoluteUrl = audioTracksInGroup.values.first;
-          AppLogger.warning('No default audio found for group $selectedAudioGroupId. Picking first available: $selectedAudioAbsoluteUrl', name: 'HlsCacheHandler');
+      // Rewrite Media Playlist (segments) to point to proxy URLs
+      String finalMediaPlaylistContent = '';
+      for (String line in mediaPlaylistLines) {
+        String trimmedLine = line.trim();
+        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+          // This is a segment URI, replace with proxy URL
+          final Uri segmentUri = _resolveUri(mediaPlaylistBaseUri, trimmedLine);
+          final String segmentFileName = p.basename(segmentUri.path); // Get just the filename
+          final String proxySegmentUrl = 'http://${_proxyServer.host}:${_proxyServer.port}/hls_segments/$trackId/$segmentFileName'; // Construct proxy URL for segment
+          finalMediaPlaylistContent += '$proxySegmentUrl\n';
+          AppLogger.info('Rewrote segment line: $trimmedLine to $proxySegmentUrl', name: 'HlsCacheHandler');
+        } else {
+          finalMediaPlaylistContent += '$line\n'; // Keep other lines as is
         }
       }
 
-      // What if there are no EXT-X-STREAM-INF (audio-only HLS)?
-      if (selectedVideoVariantAbsoluteUrl == null) {
-        AppLogger.info('No video variants found. Searching for audio-only streams.', name: 'HlsCacheHandler');
-        minBandwidth = 2147483647; // Reset for audio-only selection
-        for (int i = 0; i < masterManifestOriginalLines.length; i++) {
-          final String currentLine = masterManifestOriginalLines[i].trim();
-          if (streamInfPattern.hasMatch(currentLine)) {
-            final Match? streamMatch = streamInfPattern.firstMatch(currentLine);
-            if (streamMatch != null && streamMatch.group(2) == null) { // No RESOLUTION likely audio-only
-              final int bandwidth = int.parse(streamMatch.group(1)!);
-              if (bandwidth < minBandwidth) { // Select smallest bandwidth audio-only
-                minBandwidth = bandwidth;
-                if (i + 1 < masterManifestOriginalLines.length) {
-                  final String nextLine = masterManifestOriginalLines[i + 1].trim();
-                  if (!nextLine.startsWith('#') && nextLine.endsWith('.m3u8')) {
-                    selectedVideoVariantRelativeUri = nextLine;
-                    selectedVideoVariantAbsoluteUrl = _resolveUri(hlsUri, nextLine).toString();
-                    AppLogger.info('Found smallest audio-only variant (BANDWIDTH: $bandwidth): $selectedVideoVariantAbsoluteUrl', name: 'HlsCacheHandler');
-                  }
-                }
-              }
-            }
-          }
-        }
-        if (selectedVideoVariantAbsoluteUrl == null) {
-          AppLogger.warning('No standard video or audio-only variants identified. Assuming master manifest is the direct segment list.', name: 'HlsCacheHandler');
-          selectedVideoVariantRelativeUri = p.basename(hlsUri.path);
-          selectedVideoVariantAbsoluteUrl = hlsUrl;
-        }
-      }
+      // Save the rewritten media playlist locally
+      final String localMediaPlaylistFileName = p.basename(Uri.parse(selectedMediaPlaylistUrl).path);
+      final File localMediaPlaylistFile = File(p.join(hlsCacheDirPath, localMediaPlaylistFileName));
+      await localMediaPlaylistFile.writeAsString(finalMediaPlaylistContent);
+      AppLogger.info('Rewritten HLS media playlist saved to: ${localMediaPlaylistFile.path}', name: 'HlsCacheHandler');
 
-      if (selectedVideoVariantAbsoluteUrl == null && selectedAudioAbsoluteUrl == null) {
-        throw Exception('Could not identify a suitable variant (video or audio) to cache from the HLS master manifest.');
-      }
-
-      final Map<String, String> localRewrittenManifestPaths = {};
-      final Map<String, String> playlistsToProcess = {};
-
-      if (selectedVideoVariantRelativeUri != null && selectedVideoVariantAbsoluteUrl != null) {
-        playlistsToProcess[selectedVideoVariantRelativeUri!] = selectedVideoVariantAbsoluteUrl!;
-      }
-      if (selectedAudioRelativeUri != null && selectedAudioAbsoluteUrl != null) {
-        if (selectedVideoVariantRelativeUri == null || selectedVideoVariantRelativeUri != selectedAudioRelativeUri) {
-          playlistsToProcess[selectedAudioRelativeUri!] = selectedAudioAbsoluteUrl!;
-        }
-      }
-
-      // Initialize progress tracking
-      int totalSegmentsOverall = 0;
-      int downloadedSegmentsOverall = 0;
-
-      // First, determine total segments by downloading and parsing all selected variant manifests
-      // This is done sequentially to get the accurate total count before downloads begin
-      for (final MapEntry<String, String> entry in playlistsToProcess.entries) {
-        final String absoluteVariantUrl = entry.value;
-        AppLogger.info('Discovering segments for variant: $absoluteVariantUrl', name: 'HlsCacheHandler');
-        final Uri variantUri = Uri.parse(absoluteVariantUrl);
-        final http.Response variantManifestResponse = await http.get(variantUri); // Sequential download of manifest
-        if (variantManifestResponse.statusCode != 200) {
-          AppLogger.error('Failed to download variant manifest $absoluteVariantUrl: HTTP ${variantManifestResponse.statusCode}. Skipping segment count for this variant.', name: 'HlsCacheHandler');
-          continue;
-        }
-        final String variantManifestContent = variantManifestResponse.body;
-        final List<String> variantManifestLines = variantManifestContent.split('\n');
-
-        for (final line in variantManifestLines) {
-          final trimmedLine = line.trim();
-          if (!trimmedLine.startsWith('#') &&
-              (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.mp4')) &&
-              !trimmedLine.contains('.m3u8')) {
-            totalSegmentsOverall++; // Count segments to set total for progress
-          }
-        }
-      }
-
-      AppLogger.info('Total segments identified for sequential download: $totalSegmentsOverall', name: 'HlsCacheHandler');
-      onProgress?.call(0, totalSegmentsOverall); // Initialize progress with total count
-
-
-      // 3. Download Selected Variant Manifest(s) and their Segments Sequentially
-      for (final MapEntry<String, String> entry in playlistsToProcess.entries) {
-        final String originalRelativeUri = entry.key;
-        final String absoluteVariantUrl = entry.value;
-
-        AppLogger.info('Processing variant: $absoluteVariantUrl', name: 'HlsCacheHandler');
-        final Uri variantUri = Uri.parse(absoluteVariantUrl);
-        // We've already downloaded this to count segments, could potentially optimize by reusing content
-        // For simplicity and robustness against stale content, redownloading here.
-        final http.Response variantManifestResponse = await http.get(variantUri);
-        if (variantManifestResponse.statusCode != 200) {
-          AppLogger.error('Failed to download variant manifest $absoluteVariantUrl: HTTP ${variantManifestResponse.statusCode}. Skipping this variant.', name: 'HlsCacheHandler');
-          continue;
-        }
-
-        final String variantManifestContent = variantManifestResponse.body;
-        final List<String> variantManifestLines = variantManifestContent.split('\n');
-
-        // 4. Parse Variant Playlist for Media Segments and Download Sequentially
-        final List<String> rewrittenVariantLines = [];
-
-        for (final line in variantManifestLines) {
-          final trimmedLine = line.trim();
-          rewrittenVariantLines.add(line); // Add original line first
-
-          if (!trimmedLine.startsWith('#') &&
-              (trimmedLine.endsWith('.ts') || trimmedLine.endsWith('.mp4')) &&
-              !trimmedLine.contains('.m3u8')) {
-
-            final Uri segmentUri = _resolveUri(variantUri, trimmedLine);
-            final String segmentFileName = p.basename(segmentUri.path);
-            final String localSegmentPath = p.join(hlsCacheDirPath, segmentFileName);
-
-            // Rewrite the manifest line to point to the local filename
-            rewrittenVariantLines[rewrittenVariantLines.length - 1] = segmentFileName;
-
-            // --- Segment Download with Retry Logic (Sequential) ---
-            bool segmentDownloadedSuccessfully = false;
-            int retries = 0;
-            while (!segmentDownloadedSuccessfully && retries < _maxSegmentRetries) {
-              try {
-                AppLogger.info('Downloading segment: $segmentUri (Attempt ${retries + 1}/${_maxSegmentRetries})', name: 'HlsCacheHandler');
-                final http.Response segmentResponse = await http.get(segmentUri); // Sequential download
-                if (segmentResponse.statusCode == 200) {
-                  final File segmentFile = File(localSegmentPath);
-                  await segmentFile.writeAsBytes(segmentResponse.bodyBytes);
-                  downloadedSegmentsOverall++; // Update overall downloaded count
-                  onProgress?.call(downloadedSegmentsOverall, totalSegmentsOverall); // Report progress
-                  AppLogger.info('Downloaded segment to: $localSegmentPath', name: 'HlsCacheHandler');
-                  segmentDownloadedSuccessfully = true;
-                } else {
-                  AppLogger.warning('Failed to download segment $segmentUri: HTTP ${segmentResponse.statusCode}. Retrying...', name: 'HlsCacheHandler');
-                  retries++;
-                  await Future.delayed(_retryDelay * (retries + 1));
-                }
-              } on SocketException catch (e) {
-                AppLogger.error('SocketException downloading segment $segmentUri (Attempt ${retries + 1}): $e. Retrying...', error: e, name: 'HlsCacheHandler');
-                retries++;
-                await Future.delayed(_retryDelay * (retries + 1));
-              } on http.ClientException catch (e) {
-                AppLogger.error('ClientException downloading segment $segmentUri (Attempt ${retries + 1}): $e. Retrying...', error: e, name: 'HlsCacheHandler');
-                retries++;
-                await Future.delayed(_retryDelay * (retries + 1));
-              } catch (e, st) {
-                AppLogger.error('Unexpected error downloading segment $segmentUri: $e', error: e, stackTrace: st, name: 'HlsCacheHandler');
-                break; // For other unexpected errors, don't retry, just break for this segment
-              }
-            }
-
-            if (!segmentDownloadedSuccessfully) {
-              AppLogger.error('Failed to download segment $segmentUri after $_maxSegmentRetries attempts. This segment will be missing.', name: 'HlsCacheHandler');
-            }
-          }
-        }
-
-        // Save the rewritten variant manifest
-        final String localVariantManifestFileName = p.basename(variantUri.path);
-        final String localVariantManifestPath = p.join(hlsCacheDirPath, localVariantManifestFileName);
-        final File localVariantManifestFile = File(localVariantManifestPath);
-        await localVariantManifestFile.writeAsString(rewrittenVariantLines.join('\n'));
-        localRewrittenManifestPaths[originalRelativeUri] = localVariantManifestFile.path;
-        AppLogger.info('Rewritten local variant manifest saved to: ${localVariantManifestFile.path}', name: 'HlsCacheHandler');
-      }
-
-      AppLogger.info('Overall: Found $totalSegmentsOverall segments. Downloaded $downloadedSegmentsOverall.', name: 'HlsCacheHandler');
-
-      // 5. Rewrite Local Master Manifest to point to *only* the selected local variant(s)
+      // Save the rewritten master manifest locally
       final String localMasterManifestFileName = p.basename(hlsUri.path);
-      final String localMasterManifestPath = p.join(hlsCacheDirPath, localMasterManifestFileName);
-      final File localMasterManifestFile = File(localMasterManifestPath);
-
-      final List<String> rewrittenMasterLines = [];
-      bool inStreamInfBlock = false;
-      for (int i = 0; i < masterManifestOriginalLines.length; i++) {
-        final String originalLine = masterManifestOriginalLines[i];
-        final String trimmedLine = originalLine.trim();
-
-        if (inStreamInfBlock) {
-          inStreamInfBlock = false;
-          continue;
-        }
-
-        if (streamInfPattern.hasMatch(trimmedLine)) {
-          final Match? streamMatch = streamInfPattern.firstMatch(trimmedLine);
-          if (streamMatch != null && i + 1 < masterManifestOriginalLines.length) {
-            final String nextLineOriginalUri = masterManifestOriginalLines[i + 1].trim();
-            if (selectedVideoVariantRelativeUri == nextLineOriginalUri) {
-              rewrittenMasterLines.add(originalLine);
-              rewrittenMasterLines.add(p.basename(localRewrittenManifestPaths[nextLineOriginalUri]!));
-              inStreamInfBlock = true;
-            }
-          }
-        }
-        else if (mediaInfPattern.hasMatch(trimmedLine)) {
-          final Match? mediaMatch = mediaInfPattern.firstMatch(trimmedLine);
-          if (mediaMatch != null) {
-            final String? uriInQuote = mediaMatch.group(2);
-            if (selectedAudioRelativeUri == uriInQuote) {
-              final String localFilename = p.basename(localRewrittenManifestPaths[uriInQuote!]!);
-              rewrittenMasterLines.add(trimmedLine.replaceAll('URI="$uriInQuote"', 'URI="$localFilename"'));
-            }
-          }
-        }
-        else if (selectedVideoVariantRelativeUri == trimmedLine && !trimmedLine.startsWith('#') && trimmedLine.endsWith('.m3u8')) {
-          rewrittenMasterLines.add(p.basename(localRewrittenManifestPaths[trimmedLine]!));
-        }
-        else if (trimmedLine.startsWith('#') &&
-            !streamInfPattern.hasMatch(trimmedLine) &&
-            !mediaInfPattern.hasMatch(trimmedLine) &&
-            !subtitleMediaInfPattern.hasMatch(trimmedLine)) {
-          rewrittenMasterLines.add(originalLine);
-        }
-      }
-
-      await localMasterManifestFile.writeAsString(rewrittenMasterLines.join('\n'));
-      AppLogger.info('Rewritten HLS master manifest (single variant) saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
+      final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
+      await localMasterManifestFile.writeAsString(rewrittenMasterManifestContent);
+      AppLogger.info('Rewritten HLS master manifest saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
 
       AppLogger.info('HLS caching complete for track $trackId. Local manifest: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
+      // Return the local path to the rewritten master manifest file
       return localMasterManifestFile.path;
 
     } catch (e, st) {
@@ -351,8 +235,7 @@ class HlsCacheHandler {
     if (Uri.parse(relativePath).isAbsolute) {
       return Uri.parse(relativePath);
     }
-    final String resolvedPath = p.join(p.dirname(baseUri.path), relativePath);
-    return baseUri.replace(path: resolvedPath);
+    return baseUri.resolve(relativePath); // Use resolve for better URI handling
   }
 
   /// Deletes a cached HLS stream directory.
@@ -361,8 +244,6 @@ class HlsCacheHandler {
     if (await hlsDir.exists()) {
       AppLogger.info('Deleting HLS cache directory: ${hlsDir.path}', name: 'HlsCacheHandler');
       await hlsDir.delete(recursive: true);
-    } else {
-      AppLogger.info('HLS cache directory not found for deletion: $hlsLocalDirPath', name: 'HlsCacheHandler');
     }
   }
 }
