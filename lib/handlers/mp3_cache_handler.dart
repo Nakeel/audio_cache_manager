@@ -1,43 +1,46 @@
-import 'dart:io';
-import 'dart:convert';
-import 'package:crypto/crypto.dart';
-import 'package:dio/dio.dart' show Dio, DioException, Options, ResponseType;
-import 'package:http/http.dart' as http;
-import '../utils/aes_encryptor.dart';
-import 'package:path_provider/path_provider.dart';
+
 
 import 'dart:typed_data';
+import 'package:audio_cache_manager/utils/app_logger.dart';
+import 'package:dio/dio.dart';
 
 class Mp3CacheHandler {
-  final Dio _dio = Dio(); // Use Dio for better download control
+  final Dio _dio = Dio();
 
-  /// Downloads an MP3 file from the given URL.
-  /// Returns the raw bytes of the downloaded file.
-  Future<Uint8List?> downloadMp3Bytes(String url, {Function(int received, int total)? onProgress}) async {
+  /// Downloads MP3 bytes with progress tracking.
+  /// Returns null if download fails or is incomplete.
+  Future<Uint8List?> downloadMp3Bytes(
+      String url, {
+        Function(int received, int total)? onProgress,
+      }) async {
     try {
-      final response = await _dio.get<Uint8List>(
+      Response<Uint8List> response = await _dio.get<Uint8List>(
         url,
-        options: Options(responseType: ResponseType.bytes), // Ensure response is bytes
-        onReceiveProgress: onProgress,
+        options: Options(responseType: ResponseType.bytes),
+        onReceiveProgress: (received, total) {
+          if (onProgress != null && total != -1) {
+            onProgress(received, total);
+          }
+        },
       );
 
       if (response.statusCode == 200 && response.data != null) {
+        if (onProgress != null) {
+          // Ensure final progress is reported as 100%
+          onProgress(response.data!.length, response.data!.length);
+        }
+        AppLogger.info('Successfully downloaded MP3 from $url. Size: ${response.data!.length} bytes');
         return response.data;
       } else {
-        print('Failed to download MP3 from $url. Status: ${response.statusCode}');
+        AppLogger.warning('Failed to download MP3 from $url. Status: ${response.statusCode}');
         return null;
       }
-    } on DioException catch (e) {
-      print('DioError downloading MP3 from $url: ${e.message}');
+    } on DioException catch (e, st) {
+      AppLogger.error('DioError downloading MP3 from $url: ${e.message}', error: e, stackTrace: st);
       return null;
-    } catch (e) {
-      print('Error downloading MP3 from $url: $e');
+    } catch (e, st) {
+      AppLogger.error('Error downloading MP3 from $url: $e', error: e, stackTrace: st);
       return null;
     }
-  }
-
-  /// Encrypts the given MP3 data.
-  Uint8List encryptMp3Data(Uint8List data) {
-    return AESHelper.encryptData(data);
   }
 }
