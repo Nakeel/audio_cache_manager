@@ -320,7 +320,7 @@ class AudioCacheManager {
         }
       }
     } else {
-      if (entry.filePath.isEmpty) {
+      if (entry.filePath.isNotEmpty) {
         final File cachedFile = File(entry.filePath);
         if (await cachedFile.exists() &&
             await cachedFile.length() == entry.fileSize) {
