@@ -192,6 +192,7 @@ class AudioCacheManager {
       if (entry.isHls && entry.isEncrypted) { // <-- NEW CONDITION
         AppLogger.info('Returning PROXY URL for ENCRYPTED HLS: $trackId', name: 'AudioCacheManager');
         final proxyUrl = _proxyServer.getProxyUrl(trackId); // Generate proxy URL for the main track ID
+        AppLogger.info('Returned PROXY URL for ENCRYPTED HLS: $trackId is $proxyUrl', name: 'AudioCacheManager');
         if (proxyUrl.isEmpty) {
           AppLogger.error('Proxy server not active for encrypted HLS playback.', name: 'AudioCacheManager');
           return null;
