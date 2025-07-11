@@ -95,37 +95,44 @@ class HlsCacheHandler {
       String mediaPlaylistContent = mediaPlaylistResponse.body;
       Uri mediaPlaylistBaseUri = Uri.parse(selectedMediaPlaylistUrl); // Base URI for resolving segments
 
-      // 3. Download Segments sequentially and rewrite media playlist
+      // 3. Download Segments sequentially and prepare to rewrite media playlist
       List<String> segmentUrls = [];
-      String rewrittenMediaPlaylistContent = '';
-      int totalSegments = 0;
-      int downloadedSegments = 0;
-
       List<String> mediaPlaylistLines = mediaPlaylistContent.split('\n');
       for (String line in mediaPlaylistLines) {
         String trimmedLine = line.trim();
         if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
           // This is a segment URI
           segmentUrls.add(_resolveUri(mediaPlaylistBaseUri, trimmedLine).toString());
-          totalSegments++;
         }
       }
 
+      int totalSegments = segmentUrls.length;
+      int downloadedSegments = 0;
+
       // Track progress for segments
-      int currentProgress = 0;
-      int segmentTotalBytes = 0; // Total bytes for all segments (if known)
       if (onProgress != null) {
         // We can't know total bytes for all segments upfront,
         // so we'll report progress based on segment count
-        segmentTotalBytes = totalSegments;
+        onProgress(0, totalSegments);
       }
 
 
       for (String segmentUrl in segmentUrls) {
         AppLogger.info('Downloading segment: $segmentUrl', name: 'HlsCacheHandler');
         final Uri segmentUri = Uri.parse(segmentUrl);
-        final String segmentFileName = p.basename(segmentUri.path);
-        final File segmentFile = File(p.join(hlsCacheDirPath, segmentFileName));
+
+        // This is crucial: Construct the local path to preserve original directory structure
+        // Get the path relative to the media playlist's base URI
+        final String relativeSegmentPath = mediaPlaylistBaseUri.path.isEmpty
+            ? p.basename(segmentUri.path) // If base is root, just take filename
+            : p.relative(segmentUri.path, from: mediaPlaylistBaseUri.path.substring(0, mediaPlaylistBaseUri.path.lastIndexOf('/') + 1));
+
+        final File segmentFile = File(p.join(hlsCacheDirPath, relativeSegmentPath)); // Save with original relative path structure
+
+        // Ensure segment directory exists if it's nested
+        if (!await segmentFile.parent.exists()) {
+          await segmentFile.parent.create(recursive: true);
+        }
 
         bool segmentDownloaded = false;
         for (int retry = 0; retry < _maxSegmentRetries; retry++) {
@@ -135,7 +142,7 @@ class HlsCacheHandler {
               Uint8List segmentBytes = segmentResponse.bodyBytes;
 
               if (encrypt) {
-                AppLogger.info('Encrypting HLS segment: $segmentFileName for track $trackId', name: 'HlsCacheHandler');
+                AppLogger.info('Encrypting HLS segment: ${segmentFile.path} for track $trackId', name: 'HlsCacheHandler'); // Log full path for clarity
                 segmentBytes = AESHelper.encrypt(segmentBytes); // Encrypt segment bytes
               }
 
@@ -164,41 +171,22 @@ class HlsCacheHandler {
         }
       }
 
-      // Rewrite manifest to point to proxy URLs
-      String rewrittenMasterManifestContent = masterManifestContent;
+      // --- CRITICAL CORRECTION STARTS HERE ---
 
-      // HLS Master manifest usually contains variants which are media playlists
-      // We need to rewrite these media playlist URLs to point to the proxy
-      for (int i = 0; i < lines.length; i++) {
-        String line = lines[i].trim();
-        if (line.startsWith('#EXT-X-STREAM-INF')) {
-          if (i + 1 < lines.length) {
-            String uriLine = lines[i + 1].trim();
-            if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
-              // Construct proxy URL for the media playlist
-              final String mediaPlaylistFileName = p.basename(Uri.parse(uriLine).path);
-              final String proxyMediaPlaylistUrl = _proxyServer.getHlsManifestProxyUrl(trackId, mediaPlaylistFileName);
-
-              // Replace the original URI with the proxy URI in the content
-              rewrittenMasterManifestContent = rewrittenMasterManifestContent.replaceAll(uriLine, proxyMediaPlaylistUrl);
-              AppLogger.info('Rewrote master manifest line: $uriLine to $proxyMediaPlaylistUrl', name: 'HlsCacheHandler');
-            }
-          }
-        }
-      }
-
-
-      // Rewrite Media Playlist (segments) to point to proxy URLs
+      // 4. Rewrite Media Playlist (segments) to point to local relative paths
       String finalMediaPlaylistContent = '';
       for (String line in mediaPlaylistLines) {
         String trimmedLine = line.trim();
-        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
-          // This is a segment URI, replace with proxy URL
+        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#') && !trimmedLine.startsWith('#EXT')) { // Ensure it's a URI and not an HLS tag
+          // This is a segment URI, replace with its local relative path
           final Uri segmentUri = _resolveUri(mediaPlaylistBaseUri, trimmedLine);
-          final String segmentFileName = p.basename(segmentUri.path); // Get just the filename
-          final String proxySegmentUrl = 'http://${_proxyServer.host}:${_proxyServer.port}/hls_segments/$trackId/$segmentFileName'; // Construct proxy URL for segment
-          finalMediaPlaylistContent += '$proxySegmentUrl\n';
-          AppLogger.info('Rewrote segment line: $trimmedLine to $proxySegmentUrl', name: 'HlsCacheHandler');
+          // Get the path relative to the media playlist's base URI
+          final String relativeSegmentPath = mediaPlaylistBaseUri.path.isEmpty
+              ? p.basename(segmentUri.path)
+              : p.relative(segmentUri.path, from: mediaPlaylistBaseUri.path.substring(0, mediaPlaylistBaseUri.path.lastIndexOf('/') + 1));
+
+          finalMediaPlaylistContent += '$relativeSegmentPath\n'; // Store local relative path
+          AppLogger.info('Rewrote media playlist segment line: $trimmedLine to $relativeSegmentPath', name: 'HlsCacheHandler');
         } else {
           finalMediaPlaylistContent += '$line\n'; // Keep other lines as is
         }
@@ -210,13 +198,42 @@ class HlsCacheHandler {
       await localMediaPlaylistFile.writeAsString(finalMediaPlaylistContent);
       AppLogger.info('Rewritten HLS media playlist saved to: ${localMediaPlaylistFile.path}', name: 'HlsCacheHandler');
 
+
+      // 5. Rewrite Master Manifest: Only if needed, to point to local relative paths of media playlists.
+      // Usually, master manifests contain relative paths anyway, but if they were absolute,
+      // we'd convert them to relative paths based on the hlsCacheDirPath.
+      // For simplicity, we'll assume they are relative and copy as is or ensure correct relative path.
+      // The _proxyServer.getHlsManifestProxyUrl call and replacement is removed.
+      String finalMasterManifestContent = '';
+      for (String line in masterManifestContent.split('\n')) {
+        String trimmedLine = line.trim();
+        if (trimmedLine.startsWith('#EXT-X-STREAM-INF')) {
+          finalMasterManifestContent += line + '\n'; // Keep the stream-info line
+          // The next line contains the media playlist URI
+          int streamInfIndex = masterManifestContent.split('\n').indexOf(line);
+          if (streamInfIndex + 1 < masterManifestContent.split('\n').length) {
+            String uriLine = masterManifestContent.split('\n')[streamInfIndex + 1].trim();
+            if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
+              // Resolve the URI to an absolute one from the original base
+              Uri resolvedUri = _resolveUri(baseUri, uriLine);
+              // Get the path relative to the master manifest's location (which is hlsCacheDirPath)
+              String relativePathToMediaPlaylist = p.relative(resolvedUri.path, from: baseUri.path.substring(0, baseUri.path.lastIndexOf('/') + 1));
+              finalMasterManifestContent += '$relativePathToMediaPlaylist\n'; // Store local relative path
+              AppLogger.info('Rewrote master manifest media playlist line: $uriLine to $relativePathToMediaPlaylist', name: 'HlsCacheHandler');
+            }
+          }
+        } else {
+          finalMasterManifestContent += line + '\n'; // Keep other lines as is
+        }
+      }
+
       // Save the rewritten master manifest locally
       final String localMasterManifestFileName = p.basename(hlsUri.path);
       final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
-      await localMasterManifestFile.writeAsString(rewrittenMasterManifestContent);
+      await localMasterManifestFile.writeAsString(finalMasterManifestContent); // Save the corrected content
       AppLogger.info('Rewritten HLS master manifest saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
 
-      AppLogger.info('HLS caching complete for track $trackId. Local manifest: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
+      AppLogger.info('HLS caching complete for track $trackId. Local master manifest: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
       // Return the local path to the rewritten master manifest file
       return localMasterManifestFile.path;
 
@@ -235,7 +252,8 @@ class HlsCacheHandler {
     if (Uri.parse(relativePath).isAbsolute) {
       return Uri.parse(relativePath);
     }
-    return baseUri.resolve(relativePath); // Use resolve for better URI handling
+    // Use resolve for better URI handling, it handles '..' and other URI specifics
+    return baseUri.resolve(relativePath);
   }
 
   /// Deletes a cached HLS stream directory.
