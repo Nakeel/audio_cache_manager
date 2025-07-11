@@ -37,11 +37,10 @@ class LocalProxyServer {
         return Response.notFound('Track not found');
       }
 
-      AppLogger.info('2HLS segment: ${entry.filePath} for track, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
+      // Clarified log message for master manifest serving
+      AppLogger.info('Serving HLS master manifest for track: $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
+
       if (entry.isHls) {
-        // For HLS, we need to serve the master manifest and rewrite it.
-        // The URL for HLS should now be:
-        // http://127.0.0.1:<port>/hls/<trackId>/master.m3u8
         final String localManifestPath = entry.hlsManifestFilePath!;
         final File manifestFile = File(localManifestPath);
         if (!await manifestFile.exists()) {
@@ -50,9 +49,8 @@ class LocalProxyServer {
         }
 
         String manifestContent = await manifestFile.readAsString();
-        // IMPORTANT: Rewrite manifest content to point segments to the proxy
-        // This is complex and needs to handle all relative URLs to proxy them.
-        manifestContent = _rewriteHlsManifest(manifestContent, trackId, port); // Need to implement this helper
+        // IMPORTANT FIX: Pass the correct proxySegmentRoute
+        manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
 
         return Response.ok(manifestContent, headers: {
           'Content-Type': 'application/x-mpegURL', // MIME type for M3U8
@@ -108,13 +106,14 @@ class LocalProxyServer {
 
       Uint8List fileBytes = await hlsFile.readAsBytes();
 
-      AppLogger.info('HLS segment: $path for track, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
+      AppLogger.info('HLS segment: $path for track $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer'); // Added trackId for clarity
       if (entry.isEncrypted) {
         // If it's a segment (.ts) or a manifest that needs rewriting for proxying
         if (path.endsWith('.m3u8')) {
           // This is a media playlist. Rewrite its segment URLs to proxy.
           String manifestContent = String.fromCharCodes(fileBytes);
-         manifestContent = _rewriteHlsManifest(manifestContent, trackId, _port, basePath: path, proxySegmentRoute: '/hls_segments'); // Need to implement basePath handling
+          // Correctly passing proxySegmentRoute to rewrite sub-manifests
+          manifestContent = _rewriteHlsManifest(manifestContent, trackId, _port, basePath: path, proxySegmentRoute: '/hls_segments');
           fileBytes = Uint8List.fromList(manifestContent.codeUnits);
         } else if (path.endsWith('.ts')) { // Assuming segments are .ts and are encrypted
           AppLogger.info('Proxy server decrypting HLS segment: $path for track $trackId', name: 'LocalProxyServer');
