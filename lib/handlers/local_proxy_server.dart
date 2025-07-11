@@ -37,6 +37,7 @@ class LocalProxyServer {
         return Response.notFound('Track not found');
       }
 
+      AppLogger.info('2HLS segment: ${entry.filePath} for track, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
       if (entry.isHls) {
         // For HLS, we need to serve the master manifest and rewrite it.
         // The URL for HLS should now be:
@@ -83,7 +84,6 @@ class LocalProxyServer {
       }
     });
 
-    AppLogger.info('2HLS segment: $path for track, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
     // --- NEW ROUTE FOR HLS SEGMENTS AND SUB-MANIFESTS ---
     _router.get('/hls_segments/<trackId>/<path|.*>', (Request request, String trackId, String path) async {
       final CacheEntry? entry = await metadataStore.get(trackId);
