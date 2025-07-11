@@ -83,6 +83,7 @@ class LocalProxyServer {
       }
     });
 
+    AppLogger.info('2HLS segment: $path for track, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
     // --- NEW ROUTE FOR HLS SEGMENTS AND SUB-MANIFESTS ---
     _router.get('/hls_segments/<trackId>/<path|.*>', (Request request, String trackId, String path) async {
       final CacheEntry? entry = await metadataStore.get(trackId);
@@ -107,6 +108,7 @@ class LocalProxyServer {
 
       Uint8List fileBytes = await hlsFile.readAsBytes();
 
+      AppLogger.info('HLS segment: $path for track, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
       if (entry.isEncrypted) {
         // If it's a segment (.ts) or a manifest that needs rewriting for proxying
         if (path.endsWith('.m3u8')) {
@@ -131,41 +133,6 @@ class LocalProxyServer {
         'Accept-Ranges': 'bytes',
       });
     });
-
-    // // Route for serving HLS segments (if needed, otherwise the client might access them directly from the hlsLocalPath)
-    // // For this setup, we are serving master manifest via proxy, segments are direct or need another proxy route.
-    // // If HLS segments are to be decrypted by proxy, more complex routing will be needed.
-    // _router.get('/hls/<trackId>/<filename>', (Request request, String trackId, String filename) async {
-    //   final CacheEntry? entry = await metadataStore.get(trackId);
-    //   if (entry == null || !entry.isHls || entry.hlsLocalPath == null) {
-    //     return Response.notFound('HLS track not found or not HLS');
-    //   }
-    //
-    //   final File segmentFile = File(p.join(entry.hlsLocalPath!, filename));
-    //   if (!await segmentFile.exists()) {
-    //     return Response.notFound('HLS segment not found');
-    //   }
-    //
-    //   try {
-    //     Uint8List segmentBytes = await segmentFile.readAsBytes();
-    //     // HLS segments should ideally be decrypted by HlsCacheHandler when cached,
-    //     // so they are read already decrypted here. If they were still encrypted,
-    //     // you'd add: if (entry.isEncrypted) { segmentBytes = AESHelper.decrypt(segmentBytes); }
-    //     // based on your HLS caching strategy.
-    //
-    //     return Response.ok(
-    //       segmentBytes,
-    //       headers: {
-    //         'Content-Type': filename.endsWith('.ts') ? 'video/mp2t' : 'application/x-mpegURL',
-    //         'Content-Length': segmentBytes.length.toString(),
-    //         'Accept-Ranges': 'bytes',
-    //       },
-    //     );
-    //   } catch (e, st) {
-    //     AppLogger.error('Error serving HLS segment $filename for track $trackId from proxy: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
-    //     return Response.internalServerError(body: 'Error serving HLS segment: $e');
-    //   }
-    // });
 
 
     try {
