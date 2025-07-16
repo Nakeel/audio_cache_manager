@@ -420,8 +420,9 @@ class AudioCacheManager {
   }
 
   Future<String> _getCacheDirPath() async {
-    final Directory appCacheDir = await getTemporaryDirectory();
-    final cacheDir = Directory(p.join(appCacheDir.path, 'audio_cache'));
+    final Directory appDocDir = await getApplicationDocumentsDirectory();
+    final cacheDir = Directory(p.join(appDocDir.path, 'audio_cache'));
+
     if (!await cacheDir.exists()) {
       await cacheDir.create(recursive: true);
     }
