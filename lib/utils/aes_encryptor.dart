@@ -1,24 +1,21 @@
-import 'dart:typed_data' show Uint8List;
-import 'package:encrypt/encrypt.dart' as encrypt;
 
+import 'dart:typed_data';
+
+import 'package:encrypt/encrypt.dart' show AES, Encrypted, Encrypter, IV, Key;
+
+final Key _encryptionKey = Key.fromLength(32); // 256-bit key
+final IV _initializationVector = IV.fromLength(16); // 128-bit IV
 class AESHelper {
-  final encrypt.Key _key;
-  final encrypt.IV _iv;
+  static final Encrypter _encrypter = Encrypter(AES(_encryptionKey));
 
-  AESHelper(String key)
-      : _key = encrypt.Key.fromUtf8(key.padRight(32, '\0')),
-        _iv = encrypt.IV.fromLength(16);
-
-  List<int> encryptData(List<int> data) {
-    final encrypter = encrypt.Encrypter(encrypt.AES(_key));
-    final encrypted = encrypter.encryptBytes(data, iv: _iv);
-    return [..._iv.bytes, ...encrypted.bytes];
+  static Uint8List encrypt(Uint8List plainBytes) {
+    final Encrypted encrypted = _encrypter.encryptBytes(plainBytes, iv: _initializationVector);
+    return encrypted.bytes;
   }
 
-  List<int> decryptData(List<int> data) {
-    final iv = encrypt.IV(Uint8List.fromList(data.sublist(0, 16)));
-    final encryptedData = data.sublist(16);
-    final encrypter = encrypt.Encrypter(encrypt.AES(_key));
-    return encrypter.decryptBytes(encrypt.Encrypted(Uint8List.fromList(encryptedData)), iv: iv);
+  static Uint8List decrypt(Uint8List encryptedBytes) {
+    final Encrypted encrypted = Encrypted(encryptedBytes);
+    final Uint8List decrypted = Uint8List.fromList(_encrypter.decryptBytes(encrypted, iv: _initializationVector));
+    return decrypted;
   }
 }

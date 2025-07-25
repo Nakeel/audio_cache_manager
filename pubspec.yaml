@@ -18,10 +18,15 @@ dependencies:
   crypto: ^3.0.0
   http: ^1.1.0
   encrypt: ^5.0.0
+  dio:
   # For secure key storage (HIGHLY RECOMMENDED)
   flutter_secure_storage: ^9.2.4
   # For local HTTP server (Crucial for HLS proxy)
   shelf: ^1.4.2
+  hive_flutter: ^1.1.0
+  shelf_router: ^1.1.4
+  uuid: ^4.3.3
+  async: ^2.11.0
 #  shelf_io: any
 
 

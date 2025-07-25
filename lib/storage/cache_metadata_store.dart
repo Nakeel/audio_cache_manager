@@ -1,57 +1,71 @@
-import 'package:hive/hive.dart';
-import 'package:path_provider/path_provider.dart';
-import '../models/cache_entry.dart';
+// lib/data/cache_metadata_store.dart
 
+import 'package:audio_cache_manager/utils/app_logger.dart';
+
+import '../models/cache_entry.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 class CacheMetadataStore {
-  Box? _box; // Remove late, make nullable
-  bool _isInitialized = false; // Track initialization state
+  static const String _boxName = 'audioCacheMetadata';
+  late Box<CacheEntry> _box;
+  int _currentCacheSize = 0; // To track total size of cached items
 
   Future<void> init() async {
-    if (_isInitialized) return; // Prevent reinitialization
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-      Hive.init(dir.path);
-      _box = await Hive.openBox('audio_cache_metadata');
-      _isInitialized = true;
-    } catch (e) {
-      throw Exception('Failed to initialize cache metadata store: $e');
+    if (!Hive.isAdapterRegistered(0)) { // Check if adapter is already registered
+      Hive.registerAdapter(CacheEntryAdapter());
+    }
+    await Hive.initFlutter();
+    _box = await Hive.openBox<CacheEntry>(_boxName);
+    _calculateInitialSize(); // Calculate size on startup
+    AppLogger.info('CacheMetadataStore initialized. Current size: ${_currentCacheSize} bytes');
+  }
+
+  void _calculateInitialSize() {
+    _currentCacheSize = 0;
+    for (final entry in _box.values) {
+      _currentCacheSize += entry.fileSize; // <--- Changed from entry.fileSize
     }
   }
 
   Future<void> save(CacheEntry entry) async {
-    if (!_isInitialized) await init();
-    await _box!.put(entry.url, entry.toMap());
+    final existingEntry = _box.get(entry.trackId);
+    if (existingEntry != null) {
+      // Adjust current size if replacing an entry
+      _currentCacheSize -= existingEntry.fileSize; // <--- Changed from existingEntry.fileSize
+    }
+    await _box.put(entry.trackId, entry);
+    _currentCacheSize += entry.fileSize; // <--- Changed from entry.fileSize
+    AppLogger.info('Saved cache entry for ${entry.trackId}. Current total size: $_currentCacheSize bytes');
   }
 
-  Future<CacheEntry?> get(String url) async {
-    if (!_isInitialized) await init();
-    final map = _box!.get(url);
-    return map != null ? CacheEntry.fromMap(Map<String, dynamic>.from(map)) : null;
+  Future<CacheEntry?> get(String trackId) async {
+    return _box.get(trackId);
+  }
+
+  Future<void> delete(String trackId) async {
+    final entry = _box.get(trackId);
+    if (entry != null) {
+      _currentCacheSize -= entry.fileSize; // <--- Changed from entry.fileSize
+      await _box.delete(trackId);
+      AppLogger.info('Deleted cache entry for ${entry.trackId}. Current total size: $_currentCacheSize bytes');
+    }
   }
 
   Future<List<CacheEntry>> getAll() async {
-    if (!_isInitialized) await init();
-    return _box!.values
-        .map((e) => CacheEntry.fromMap(Map<String, dynamic>.from(e)))
-        .toList();
-  }
-
-  Future<void> delete(String url) async {
-    if (!_isInitialized) await init();
-    await _box!.delete(url);
+    return _box.values.toList();
   }
 
   Future<void> clear() async {
-    if (!_isInitialized) await init();
-    await _box!.clear();
+    await _box.clear();
+    _currentCacheSize = 0;
+    AppLogger.info('Cleared all cache metadata. Current total size: $_currentCacheSize bytes');
   }
 
-  Future<void> dispose() async {
-    if (_isInitialized) {
-      await _box?.close();
-      _isInitialized = false;
-      _box = null;
-    }
+  int getCurrentCacheSize() {
+    return _currentCacheSize;
+  }
+
+  Future<void> close() async {
+    await _box.close();
   }
 }
