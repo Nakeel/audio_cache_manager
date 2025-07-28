@@ -29,14 +29,16 @@ class CacheEntryAdapter extends TypeAdapter<CacheEntry> {
       proxyUrl: fields[9] as String,
       isHls: fields[10] as bool,
       hlsLocalPath: fields[11] as String?,
-      hlsManifestFilePath: fields[12] as String?,
+      hlsMasterManifestFileName: fields[12] as String?,
+      hlsMediaPlaylistFileName: fields[13] as String?,
+      hlsSegments: (fields[14] as List?)?.cast<HlsSegmentEntry>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, CacheEntry obj) {
     writer
-      ..writeByte(13)
+      ..writeByte(15)
       ..writeByte(0)
       ..write(obj.trackId)
       ..writeByte(1)
@@ -62,7 +64,11 @@ class CacheEntryAdapter extends TypeAdapter<CacheEntry> {
       ..writeByte(11)
       ..write(obj.hlsLocalPath)
       ..writeByte(12)
-      ..write(obj.hlsManifestFilePath);
+      ..write(obj.hlsMasterManifestFileName)
+      ..writeByte(13)
+      ..write(obj.hlsMediaPlaylistFileName)
+      ..writeByte(14)
+      ..write(obj.hlsSegments);
   }
 
   @override

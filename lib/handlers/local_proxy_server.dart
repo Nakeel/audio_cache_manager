@@ -9,7 +9,7 @@ import 'package:audio_cache_manager/utils/app_logger.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
-import 'package:path/path.dart' as p; // Import path package
+import 'package:path/path.dart' as p;
 
 class LocalProxyServer {
   HttpServer? _server;
@@ -30,27 +30,30 @@ class LocalProxyServer {
 
     final Router _router = Router();
 
-    // Existing route for MP3s and now the initial request for HLS
+    // Route for MP3s and the main HLS master manifest (via trackId)
     _router.get('/audio/<trackId>', (Request request, String trackId) async {
       final CacheEntry? entry = await metadataStore.get(trackId);
       if (entry == null) {
         return Response.notFound('Track not found');
       }
 
-      // Clarified log message for master manifest serving
-      AppLogger.info('Serving HLS master manifest for track: $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
+      AppLogger.info('Serving request for track: $trackId, isHls: ${entry.isHls}, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
 
       if (entry.isHls) {
-        final String localManifestPath = entry.hlsManifestFilePath!;
-        final File manifestFile = File(localManifestPath);
+        // For HLS, this route serves the local master manifest.
+        // The master manifest itself is already rewritten by HlsCacheHandler to point
+        // to local segments (via /hls_segments route) or original URLs.
+        final String localMasterManifestPath = p.join(entry.hlsLocalPath!, entry.hlsMasterManifestFileName!);
+        final File manifestFile = File(localMasterManifestPath);
         if (!await manifestFile.exists()) {
-          AppLogger.error('HLS master manifest not found: $localManifestPath', name: 'LocalProxyServer');
-          return Response.internalServerError(body: 'HLS manifest not found.');
+          AppLogger.error('HLS master manifest not found: $localMasterManifestPath', name: 'LocalProxyServer');
+          return Response.internalServerError(body: 'HLS master manifest not found locally.');
         }
 
         String manifestContent = await manifestFile.readAsString();
-        // IMPORTANT FIX: Pass the correct proxySegmentRoute
-        manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
+        // No further rewriting needed here, as HlsCacheHandler already prepared it.
+        // The master manifest points to the media playlist (which is local),
+        // and the media playlist points to segments (local proxy or original URL).
 
         return Response.ok(manifestContent, headers: {
           'Content-Type': 'application/x-mpegURL', // MIME type for M3U8
@@ -66,7 +69,7 @@ class LocalProxyServer {
         }
         Uint8List fileBytes = await cachedFile.readAsBytes();
         if (entry.isEncrypted) {
-          AppLogger.info('Proxy server decrypting content for $trackId', name: 'LocalProxyServer');
+          AppLogger.info('Proxy server decrypting content for MP3 $trackId', name: 'LocalProxyServer');
           try {
             fileBytes = AESHelper.decrypt(fileBytes); // This is where the MP3 decrypt happens
           } catch (e, st) {
@@ -83,9 +86,12 @@ class LocalProxyServer {
     });
 
     // --- NEW ROUTE FOR HLS SEGMENTS AND SUB-MANIFESTS ---
+    // This route serves individual HLS segments (.ts) and potentially media playlists (.m3u8)
+    // that are referenced by the master manifest.
     _router.get('/hls_segments/<trackId>/<path|.*>', (Request request, String trackId, String path) async {
       final CacheEntry? entry = await metadataStore.get(trackId);
       if (entry == null || !entry.isHls || entry.hlsLocalPath == null) {
+        AppLogger.warning('HLS track not found or not an HLS entry for trackId: $trackId, path: $path', name: 'LocalProxyServer');
         return Response.notFound('HLS track not found or not an HLS entry.');
       }
 
@@ -93,7 +99,7 @@ class LocalProxyServer {
       final File hlsFile = File(fullLocalPath);
 
       if (!await hlsFile.exists()) {
-        AppLogger.warning('HLS file not found: $fullLocalPath', name: 'LocalProxyServer');
+        AppLogger.warning('HLS file not found locally: $fullLocalPath for track $trackId', name: 'LocalProxyServer');
         return Response.notFound('HLS segment or manifest not found locally.');
       }
 
@@ -106,16 +112,11 @@ class LocalProxyServer {
 
       Uint8List fileBytes = await hlsFile.readAsBytes();
 
-      AppLogger.info('HLS segment: $path for track $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer'); // Added trackId for clarity
+      AppLogger.info('Serving HLS file: $path for track $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
       if (entry.isEncrypted) {
-        // If it's a segment (.ts) or a manifest that needs rewriting for proxying
-        if (path.endsWith('.m3u8')) {
-          // This is a media playlist. Rewrite its segment URLs to proxy.
-          String manifestContent = String.fromCharCodes(fileBytes);
-          // Correctly passing proxySegmentRoute to rewrite sub-manifests
-          manifestContent = _rewriteHlsManifest(manifestContent, trackId, _port, basePath: path, proxySegmentRoute: '/hls_segments');
-          fileBytes = Uint8List.fromList(manifestContent.codeUnits);
-        } else if (path.endsWith('.ts')) { // Assuming segments are .ts and are encrypted
+        // If it's a segment (.ts) that was encrypted during caching, decrypt it.
+        // Media playlists (.m3u8) are not encrypted, but their contents are rewritten.
+        if (path.endsWith('.ts')) {
           AppLogger.info('Proxy server decrypting HLS segment: $path for track $trackId', name: 'LocalProxyServer');
           try {
             fileBytes = AESHelper.decrypt(fileBytes); // Decrypt the segment
@@ -124,6 +125,8 @@ class LocalProxyServer {
             return Response.internalServerError(body: 'Error decrypting HLS segment: $e');
           }
         }
+        // No need to rewrite manifest content here; HlsCacheHandler already did that.
+        // The proxy just serves the file as-is after decryption.
       }
 
       return Response.ok(fileBytes, headers: {
@@ -144,66 +147,26 @@ class LocalProxyServer {
     }
   }
 
-  /// Helper to get the full proxy URL for a given trackId.
+  /// Helper to get the full proxy URL for a given trackId (for MP3s or main HLS manifest).
   String getProxyUrl(String trackId) {
     if (_server == null || _port == 0) {
-      AppLogger.warning('Proxy server not running. Cannot generate proxy URL.', name: 'LocalProxyServer');
-      return ''; // Or throw an exception
+      AppLogger.warning('Proxy server not running. Cannot generate proxy URL for trackId: $trackId', name: 'LocalProxyServer');
+      return '';
     }
     return 'http://$host:${_server!.port}/audio/$trackId';
   }
 
-  /// Helper to get the full proxy URL for an HLS master manifest.
-  /// This should be used when the master manifest URL is rewritten to point to the proxy.
-  String getHlsManifestProxyUrl(String trackId, String originalManifestFileName) {
+  /// Helper to get the full proxy URL for an HLS segment or sub-manifest.
+  String getHlsSegmentProxyUrl(String trackId, String relativePath) {
     if (_server == null || _port == 0) {
-      AppLogger.warning('Proxy server not running. Cannot generate HLS manifest proxy URL.', name: 'LocalProxyServer');
-      return ''; // Or throw an exception
+      AppLogger.warning('Proxy server not running. Cannot generate HLS segment proxy URL for trackId: $trackId, path: $relativePath', name: 'LocalProxyServer');
+      return '';
     }
-    // The HLS manifest route should be designed to handle the manifest file name.
-    // For this setup, we use the general audio route, but with the specific filename if needed for distinction
-    // For now, it's served by the /audio/<trackId> route, and the HlsCacheHandler rewrites the inner manifest paths.
-    // If you need a distinct proxy route for HLS manifests, you'd add another router.get.
-    return 'http://$host:${_server!.port}/audio/$trackId';
+    // The `path` in the route is the relative path within the HLS track directory.
+    // Ensure `relativePath` is correctly URL-encoded if it contains special characters.
+    final encodedPath = Uri.encodeComponent(relativePath); // Encode the path
+    return 'http://$host:${_server!.port}/hls_segments/$trackId/$encodedPath';
   }
-
-  // Helper method to rewrite HLS manifests to point to the proxy
-  // This is a complex helper and will require careful implementation
-   String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_stream'}) {
-    // Ensure the proxySegmentRoute starts with a '/'
-       if (!proxySegmentRoute.startsWith('/')) {
-         proxySegmentRoute = '/$proxySegmentRoute';
-       }
-    // This is a simplified example. Actual implementation needs robust parsing.
-    // Use regex or a proper HLS manifest parser (if available)
-    // to replace segment/sub-manifest paths with proxy URLs.
-
-    // Example for a simple case, replacing .ts segments:
-    // #EXTINF:10.0,
-    // segment1.ts
-    // would become:
-    // #EXTINF:10.0,
-    // http://127.0.0.1:CURRENT_PORT/hls_stream/<trackId>/segment1.ts
-
-    final RegExp urlPattern = RegExp(r'^(?!#)(.*\.ts|.*\.m3u8)$', multiLine: true); // Matches lines that are not comments and end with .ts or .m3u8
-    return manifestContent.replaceAllMapped(urlPattern, (match) {
-      String originalPath = match.group(1)!;
-      // Resolve against original base URI from HlsCacheHandler if needed,
-      // but here we just need to ensure it's relative to the hlsLocalPath.
-      // And then turn it into a proxy URL.
-
-      // If it's a media playlist, the segments are relative to its own path.
-      // So the path parameter in the route should be included in the local file path.
-      // e.g., /hls_stream/trackId/variant/segment.ts
-      final String resolvedPath = p.join(p.dirname(basePath), originalPath);
-
-      // Construct the new proxy URL for this specific segment or sub-manifest
-      final String fullProxyPath = 'http://127.0.0.1:$port$proxySegmentRoute/$trackId/$resolvedPath';
-      AppLogger.info('Rewriting HLS URL: $originalPath (resolved to $resolvedPath) to $fullProxyPath', name: 'HlsProxyRewrite');
-      return fullProxyPath;
-    });
-  }
-
 
   Future<void> stop() async {
     if (_server != null) {
@@ -215,4 +178,3 @@ class LocalProxyServer {
     }
   }
 }
-
