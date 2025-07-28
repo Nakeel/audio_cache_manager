@@ -8,6 +8,7 @@ import 'package:audio_cache_manager/storage/cache_metadata_store.dart';
 import 'package:audio_cache_manager/utils/app_logger.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+// import 'package:udux_flutter/data/network/network_checker.dart'; // NEW: Import InternetChecker
 
 class AudioCacheManager {
   static final AudioCacheManager _instance = AudioCacheManager._internal();
@@ -20,6 +21,7 @@ class AudioCacheManager {
   late LocalProxyServer _proxyServer;
   late Mp3CacheHandler _mp3CacheHandler;
   late HlsCacheHandler _hlsCacheHandler;
+  // late dynamic _internetChecker; // NEW: Declare InternetChecker
 
   bool _isInitialized = false;
   Duration _expirationDuration = const Duration(days: 30);
@@ -27,7 +29,7 @@ class AudioCacheManager {
 
   bool get isInitialized => _isInitialized;
 
-  Future<void> init() async {
+  Future<void> init(dynamic internetChecker) async {
     if (_isInitialized) {
       AppLogger.warning('AudioCacheManager already initialized.', name: 'AudioCacheManager');
       return;
@@ -45,8 +47,14 @@ class AudioCacheManager {
     _mp3CacheHandler = Mp3CacheHandler();
     await _mp3CacheHandler.init(_cacheDirPath);
 
-    // NEW: Pass metadataStore to HlsCacheHandler
-    _hlsCacheHandler = HlsCacheHandler(proxyServer: _proxyServer, metadataStore: _metadataStore);
+    // _internetChecker = InternetChecker(); // NEW: Initialize InternetChecker
+
+    // NEW: Pass metadataStore AND internetChecker to HlsCacheHandler
+    _hlsCacheHandler = HlsCacheHandler(
+      proxyServer: _proxyServer,
+      metadataStore: _metadataStore,
+      internetChecker: internetChecker, // NEW: Pass InternetChecker
+    );
 
     _isInitialized = true;
     AppLogger.info('AudioCacheManager initialized. Cache directory: $_cacheDirPath', name: 'AudioCacheManager');
@@ -137,6 +145,10 @@ class AudioCacheManager {
       // If MP3 is encrypted, its playback URL MUST be through the proxy server.
       if (encrypt) {
         playbackUrl = _proxyServer.getProxyUrl(trackId);
+        if (playbackUrl.isEmpty) {
+          AppLogger.error('Proxy URL for encrypted MP3 is empty. Cannot play.', name: 'AudioCacheManager');
+          return null;
+        }
         AppLogger.info('Generated proxy URL for encrypted MP3 $trackId: $playbackUrl', name: 'AudioCacheManager');
       } else {
         playbackUrl = 'file://$localPath';
@@ -224,6 +236,7 @@ class AudioCacheManager {
 
   /// Checks if an audio track is cached.
   /// For HLS, considers it cached if at least one segment is complete.
+  @override
   Future<bool> isAudioCached(String trackId) async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -244,6 +257,7 @@ class AudioCacheManager {
   }
 
   /// Deletes a cached audio file.
+  @override
   Future<void> deleteCachedAudio(String trackId) async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -277,6 +291,7 @@ class AudioCacheManager {
   }
 
   /// Clears all cached audio files and their metadata.
+  @override
   Future<void> clearAllCache() async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -319,6 +334,7 @@ class AudioCacheManager {
 
 
   /// Returns the number of currently cached audio items.
+  @override
   Future<int> getCachedItemCount() async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -328,6 +344,7 @@ class AudioCacheManager {
   }
 
   /// Returns the total size of currently cached audio items in bytes.
+  @override
   Future<int> getCurrentCacheSize() async {
     if (!_isInitialized) {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
@@ -431,6 +448,7 @@ class AudioCacheManager {
     if (_isInitialized) {
       _proxyServer.stop();
       _metadataStore.close();
+      // _internetChecker.dispose(); // NEW: Dispose InternetChecker
       _isInitialized = false;
       AppLogger.info('AudioCacheManager disposed.', name: 'AudioCacheManager');
     }

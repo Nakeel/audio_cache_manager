@@ -6,20 +6,25 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'dart:async';
 import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
-import 'package:audio_cache_manager/models/cache_entry.dart'; // Import CacheEntry
-import 'package:audio_cache_manager/models/hls_segment_entry.dart'; // Import HlsSegmentEntry
-import 'package:audio_cache_manager/storage/cache_metadata_store.dart'; // Import CacheMetadataStore
+import 'package:audio_cache_manager/models/cache_entry.dart';
+import 'package:audio_cache_manager/models/hls_segment_entry.dart';
+import 'package:audio_cache_manager/storage/cache_metadata_store.dart';
 
 class HlsCacheHandler {
   static const int _maxSegmentRetries = 3;
   static const Duration _retryDelay = Duration(seconds: 2);
 
   final LocalProxyServer _proxyServer;
-  final CacheMetadataStore _metadataStore; // NEW: Inject metadata store
+  final CacheMetadataStore _metadataStore;
+  final dynamic _internetChecker; // NEW: Inject InternetChecker
 
-  HlsCacheHandler({required LocalProxyServer proxyServer, required CacheMetadataStore metadataStore})
-      : _proxyServer = proxyServer,
-        _metadataStore = metadataStore; // Initialize metadata store
+  HlsCacheHandler({
+    required LocalProxyServer proxyServer,
+    required CacheMetadataStore metadataStore,
+    required dynamic internetChecker, // NEW: Add to constructor
+  })  : _proxyServer = proxyServer,
+        _metadataStore = metadataStore,
+        _internetChecker = internetChecker; // Initialize InternetChecker
 
   /// Caches an HLS stream, downloading a single chosen variant and its segments.
   /// It supports resuming incomplete downloads and stores segment-level metadata.
@@ -61,7 +66,12 @@ class HlsCacheHandler {
         }
       }
 
+      // Check network before trying to download master manifest
       if (masterManifestContent == null) {
+        if (!await _internetChecker.hasInternet) {
+          AppLogger.warning('No internet to download master manifest for $trackId. Cannot proceed with caching.', name: 'HlsCacheHandler');
+          return null; // Cannot cache without master manifest
+        }
         AppLogger.info('Downloading master manifest from $hlsUrl', name: 'HlsCacheHandler');
         final http.Response masterManifestResponse = await http.get(hlsUri);
         if (masterManifestResponse.statusCode != 200) {
@@ -112,7 +122,12 @@ class HlsCacheHandler {
         }
       }
 
+      // Check network before trying to download media playlist
       if (mediaPlaylistContent == null) {
+        if (!await _internetChecker.hasInternet) {
+          AppLogger.warning('No internet to download media playlist for $trackId. Cannot proceed with caching.', name: 'HlsCacheHandler');
+          return null; // Cannot cache without media playlist
+        }
         AppLogger.info('Downloading media playlist from $selectedMediaPlaylistUrl', name: 'HlsCacheHandler');
         final http.Response mediaPlaylistResponse = await http.get(Uri.parse(selectedMediaPlaylistUrl));
         if (mediaPlaylistResponse.statusCode != 200) {
@@ -172,6 +187,12 @@ class HlsCacheHandler {
           continue; // Skip if already complete
         }
 
+        // NEW: Check network connectivity before attempting to download each segment
+        if (!await _internetChecker.hasInternet) {
+          AppLogger.warning('No internet connection. Halting HLS segment download for track $trackId. Will continue with hybrid playback.', name: 'HlsCacheHandler');
+          break; // Exit the loop gracefully
+        }
+
         AppLogger.info('Processing segment: ${segment.originalUrl}', name: 'HlsCacheHandler');
         final Uri segmentUri = Uri.parse(segment.originalUrl);
         final File segmentFile = File(p.join(hlsTrackDirPath, segment.localRelativePath));
@@ -183,6 +204,12 @@ class HlsCacheHandler {
 
         bool segmentDownloadSuccess = false;
         for (int retry = 0; retry < _maxSegmentRetries; retry++) {
+          // NEW: Check network connectivity before each retry
+          if (!await _internetChecker.hasInternet) {
+            AppLogger.warning('No internet connection during retry for segment ${segment.localRelativePath}. Halting HLS segment download.', name: 'HlsCacheHandler');
+            break; // Exit retry loop if no internet
+          }
+
           try {
             // Check for partial download and set Range header
             int startByte = 0;
@@ -252,6 +279,12 @@ class HlsCacheHandler {
             } else {
               AppLogger.warning('Failed to download segment ${segment.localRelativePath}: ${segmentResponse.statusCode}. Retrying...', name: 'HlsCacheHandler');
             }
+          } on SocketException catch (e, st) {
+            AppLogger.warning('SocketException during segment download for ${segment.localRelativePath}: $e. This often indicates network loss. Halting download.', name: 'HlsCacheHandler');
+            // If a SocketException occurs, it's a strong indicator of network loss.
+            // Break from the retry loop and the main download loop.
+            segmentDownloadSuccess = false; // Ensure it's marked as not successful
+            break;
           } catch (e, st) {
             AppLogger.error('Error downloading segment ${segment.localRelativePath}: $e. Retrying...', error: e, stackTrace: st, name: 'HlsCacheHandler');
           }
@@ -259,12 +292,17 @@ class HlsCacheHandler {
         }
 
         if (!segmentDownloadSuccess) {
-          AppLogger.error('Failed to download segment after $_maxSegmentRetries retries: ${segment.originalUrl}', name: 'HlsCacheHandler');
+          AppLogger.error('Failed to download segment after $_maxSegmentRetries retries or network lost: ${segment.originalUrl}', name: 'HlsCacheHandler');
           // Do NOT throw an exception here. We want to continue caching other segments
           // and rely on the manifest rewriting to point to the original URL for this failed segment.
           // Mark segment as incomplete if it's not already.
           segment = segment.copyWith(isComplete: false);
           segmentsToCache[i] = segment;
+          // If the failure was due to network loss, we should stop further downloads.
+          if (!await _internetChecker.hasInternet) {
+            AppLogger.warning('Network still unavailable after segment failure. Stopping further HLS segment downloads.', name: 'HlsCacheHandler');
+            break; // Break the main segment loop
+          }
         }
 
         // Update progress for each segment processed (whether downloaded or skipped)
