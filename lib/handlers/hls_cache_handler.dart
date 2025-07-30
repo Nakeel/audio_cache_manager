@@ -204,8 +204,6 @@ class HlsCacheHandler {
               if (startByte > 0 && startByte < segment.totalBytes) {
                 AppLogger.info('Resuming download for segment ${segment.localRelativePath} from byte $startByte', name: 'HlsCacheHandler');
               } else if (startByte == segment.totalBytes && segment.totalBytes > 0) {
-                // If file exists and matches expected total bytes, mark as complete and skip
-                // We'll calculate hash only if we actually download/write
                 segment = segment.copyWith(isComplete: true, downloadedBytes: startByte);
                 segmentsToCache[i] = segment;
                 segmentDownloadSuccess = true;
@@ -235,7 +233,6 @@ class HlsCacheHandler {
                 newDownloadedBytes = segmentBytes.length;
               }
 
-              // Calculate hash of the original (decrypted) content BEFORE encryption
               String? segmentDataHash = AESHelper.calculateSha256(segmentBytes);
               AppLogger.info('Calculated SHA-256 hash for segment ${segment.localRelativePath}: $segmentDataHash', name: 'HlsCacheHandler');
 
@@ -255,7 +252,7 @@ class HlsCacheHandler {
                 downloadedBytes: newDownloadedBytes,
                 totalBytes: segmentTotalBytes > 0 ? segmentTotalBytes : newDownloadedBytes,
                 isComplete: (segmentTotalBytes > 0 && newDownloadedBytes >= segmentTotalBytes) || (segmentTotalBytes == 0 && newDownloadedBytes > 0),
-                dataHash: segmentDataHash, // NEW: Store the hash
+                dataHash: segmentDataHash,
               );
               segmentsToCache[i] = segment;
               AppLogger.info('Saved segment: ${segment.localRelativePath}, downloaded: ${segment.downloadedBytes}/${segment.totalBytes} bytes, complete: ${segment.isComplete}', name: 'HlsCacheHandler');
@@ -268,7 +265,7 @@ class HlsCacheHandler {
               AppLogger.warning('Failed to download segment ${segment.localRelativePath}: ${segmentResponse.statusCode}. Retrying...', name: 'HlsCacheHandler');
             }
           } on SocketException catch (e, st) {
-            AppLogger.warning('SocketException during segment download for ${segment.localRelativePath}: $e. This often indicates network loss. Halting download.', name: 'HlsCacheHandler');
+            AppLogger.error('SocketException during segment download for ${segment.localRelativePath}: $e. This often indicates network loss. Halting download.', error: e, stackTrace: st, name: 'HlsCacheHandler');
             segmentDownloadSuccess = false;
             break;
           } catch (e, st) {
@@ -279,7 +276,7 @@ class HlsCacheHandler {
 
         if (!segmentDownloadSuccess) {
           AppLogger.error('Failed to download segment after $_maxSegmentRetries retries or network lost: ${segment.originalUrl}', name: 'HlsCacheHandler');
-          segment = segment.copyWith(isComplete: false, dataHash: null); // Clear hash if incomplete
+          segment = segment.copyWith(isComplete: false, dataHash: null);
           segmentsToCache[i] = segment;
           if (!await _internetChecker.hasInternet) {
             AppLogger.warning('Network still unavailable after segment failure. Stopping further HLS segment downloads.', name: 'HlsCacheHandler');
@@ -292,7 +289,6 @@ class HlsCacheHandler {
           onProgress(downloadedSegmentsCount, totalSegments);
         }
 
-        // Save metadata after each segment to ensure progress is persisted
         await _metadataStore.save(
           existingEntry?.copyWith(
             hlsSegments: segmentsToCache,
@@ -311,7 +307,7 @@ class HlsCacheHandler {
             isHls: true,
             hlsLocalPath: hlsTrackDirPath,
             hlsSegments: segmentsToCache,
-            dataHash: null, // Master entry doesn't have a single dataHash
+            dataHash: null,
           ),
         );
       } // End of segment download loop
@@ -331,16 +327,24 @@ class HlsCacheHandler {
 
   /// Helper to resolve relative URIs against a base URI.
   Uri _resolveUri(Uri baseUri, String relativePath) {
+    AppLogger.info('[_resolveUri] Base URI: $baseUri, Relative Path: $relativePath', name: 'HlsCacheHandler');
     if (Uri.parse(relativePath).isAbsolute) {
+      AppLogger.info('[_resolveUri] Relative path is absolute. Returning parsed URI.', name: 'HlsCacheHandler');
       return Uri.parse(relativePath);
     }
-    return baseUri.resolve(relativePath);
+    final resolvedUri = baseUri.resolve(relativePath);
+    AppLogger.info('[_resolveUri] Resolved URI: $resolvedUri', name: 'HlsCacheHandler');
+    return resolvedUri;
   }
 
   /// Helper to get the relative path of a segment within the HLS track directory.
   String _getRelativeSegmentPath(Uri mediaPlaylistBaseUri, Uri segmentUri) {
+    AppLogger.info('[_getRelativeSegmentPath] Media Playlist Base URI: $mediaPlaylistBaseUri, Segment URI: $segmentUri', name: 'HlsCacheHandler');
     final String baseDir = mediaPlaylistBaseUri.path.substring(0, mediaPlaylistBaseUri.path.lastIndexOf('/') + 1);
-    return p.relative(segmentUri.path, from: baseDir);
+    AppLogger.info('[_getRelativeSegmentPath] Calculated base directory for relative path: $baseDir', name: 'HlsCacheHandler');
+    final String relativePath = p.relative(segmentUri.path, from: baseDir);
+    AppLogger.info('[_getRelativeSegmentPath] Final relative path: $relativePath', name: 'HlsCacheHandler');
+    return relativePath;
   }
 
   /// Deletes a cached HLS stream directory.
@@ -353,7 +357,6 @@ class HlsCacheHandler {
   }
 }
 
-// Extension to easily find HlsSegmentEntry by originalUrl
 extension on List<HlsSegmentEntry> {
   HlsSegmentEntry? firstWhereOrNull(bool Function(HlsSegmentEntry) test) {
     for (var element in this) {

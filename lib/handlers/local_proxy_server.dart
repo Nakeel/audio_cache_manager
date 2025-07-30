@@ -62,6 +62,11 @@ class LocalProxyServer {
         String originalManifestContent = await manifestFile.readAsString();
         String rewrittenManifestContent = _rewriteHlsMasterManifest(originalManifestContent, trackId, port, entry.hlsLocalPath!);
 
+        AppLogger.info('Serving rewritten HLS Master Manifest for $trackId. Content length: ${rewrittenManifestContent.length}', name: 'LocalProxyServer');
+        // Log a snippet of the rewritten manifest for debugging
+        AppLogger.info('Rewritten Master Manifest Snippet:\n${rewrittenManifestContent.substring(0, rewrittenManifestContent.length > 500 ? 500 : rewrittenManifestContent.length)}...', name: 'LocalProxyServer');
+
+
         return Response.ok(rewrittenManifestContent, headers: {
           'Content-Type': 'application/x-mpegURL', // Correct MIME type for M3U8
           'Content-Length': rewrittenManifestContent.length.toString(),
@@ -69,6 +74,7 @@ class LocalProxyServer {
           'Cache-Control': 'no-cache, no-store, must-revalidate', // Prevent client caching of this manifest
           'Pragma': 'no-cache',
           'Expires': '0',
+          'Access-Control-Allow-Origin': '*', // Allow cross-origin requests (good practice for local proxies)
         });
       } else {
         // --- MP3 LOGIC WITH INTEGRITY CHECK ---
@@ -104,6 +110,7 @@ class LocalProxyServer {
           'Content-Type': entry.contentType,
           'Content-Length': contentToHash.length.toString(),
           'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*', // Allow cross-origin requests
         });
       }
     });
@@ -119,6 +126,8 @@ class LocalProxyServer {
       final String fullLocalPath = p.join(entry.hlsLocalPath!, path);
       final File hlsFile = File(fullLocalPath);
 
+      AppLogger.info('Attempting to serve HLS file: $fullLocalPath for track $trackId', name: 'LocalProxyServer');
+
       if (!await hlsFile.exists()) {
         AppLogger.warning('HLS file not found locally: $fullLocalPath for track $trackId', name: 'LocalProxyServer');
         return Response.notFound('HLS segment or manifest not found locally.');
@@ -129,6 +138,11 @@ class LocalProxyServer {
         contentType = 'application/x-mpegURL';
         String originalMediaPlaylistContent = await hlsFile.readAsString();
         String rewrittenMediaPlaylistContent = _rewriteHlsMediaPlaylist(originalMediaPlaylistContent, trackId, port, entry.hlsSegments, p.dirname(path));
+
+        AppLogger.info('Serving rewritten HLS Media Playlist for $trackId, path: $path. Content length: ${rewrittenMediaPlaylistContent.length}', name: 'LocalProxyServer');
+        // Log a snippet of the rewritten manifest for debugging
+        AppLogger.info('Rewritten Media Playlist Snippet:\n${rewrittenMediaPlaylistContent.substring(0, rewrittenMediaPlaylistContent.length > 500 ? 500 : rewrittenMediaPlaylistContent.length)}...', name: 'LocalProxyServer');
+
         return Response.ok(rewrittenMediaPlaylistContent, headers: {
           'Content-Type': contentType,
           'Content-Length': rewrittenMediaPlaylistContent.length.toString(),
@@ -136,6 +150,7 @@ class LocalProxyServer {
           'Cache-Control': 'no-cache, no-store, must-revalidate', // Prevent client caching of this manifest
           'Pragma': 'no-cache',
           'Expires': '0',
+          'Access-Control-Allow-Origin': '*', // Allow cross-origin requests
         });
       } else if (path.endsWith('.ts')) {
         contentType = 'video/mp2t'; // Correct MIME type for MPEG-2 Transport Stream
@@ -167,6 +182,7 @@ class LocalProxyServer {
           'Content-Type': contentType,
           'Content-Length': contentToHash.length.toString(),
           'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*', // Allow cross-origin requests
         });
       } else {
         AppLogger.warning('Unsupported HLS file type requested: $path', name: 'LocalProxyServer');
@@ -218,7 +234,7 @@ class LocalProxyServer {
 
       // Normalize the path to match how it's stored in HlsSegmentEntry
       final String segmentLocalRelativePath = p.normalize(p.join(currentManifestRelativeDir, originalRelativePath));
-      AppLogger.info('Rewriting media playlist: Original relative path: $originalRelativePath, Normalized local path: $segmentLocalRelativePath', name: 'LocalProxyRewrite');
+      AppLogger.info('Rewriting media playlist: Original relative path: $originalRelativePath, Current manifest relative dir: $currentManifestRelativeDir, Normalized local path: $segmentLocalRelativePath', name: 'LocalProxyRewrite');
 
 
       final HlsSegmentEntry? segmentEntry = cachedSegments?.firstWhereOrNull((s) => s.localRelativePath == segmentLocalRelativePath);
