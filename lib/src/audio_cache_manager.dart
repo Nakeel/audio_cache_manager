@@ -3,12 +3,12 @@ import 'dart:io';
 import 'package:audio_cache_manager/handlers/hls_cache_handler.dart';
 import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
 import 'package:audio_cache_manager/handlers/mp3_cache_handler.dart';
+import 'package:audio_cache_manager/handlers/network_checker.dart';
 import 'package:audio_cache_manager/models/cache_entry.dart';
 import 'package:audio_cache_manager/storage/cache_metadata_store.dart';
 import 'package:audio_cache_manager/utils/app_logger.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-// import 'package:udux_flutter/data/network/network_checker.dart'; // NEW: Import InternetChecker
 
 class AudioCacheManager {
   static final AudioCacheManager _instance = AudioCacheManager._internal();
@@ -21,7 +21,7 @@ class AudioCacheManager {
   late LocalProxyServer _proxyServer;
   late Mp3CacheHandler _mp3CacheHandler;
   late HlsCacheHandler _hlsCacheHandler;
-  // late dynamic _internetChecker; // NEW: Declare InternetChecker
+  late InternetChecker _internetChecker;
 
   bool _isInitialized = false;
   Duration _expirationDuration = const Duration(days: 30);
@@ -29,7 +29,7 @@ class AudioCacheManager {
 
   bool get isInitialized => _isInitialized;
 
-  Future<void> init(dynamic internetChecker) async {
+  Future<void> init() async {
     if (_isInitialized) {
       AppLogger.warning('AudioCacheManager already initialized.', name: 'AudioCacheManager');
       return;
@@ -47,13 +47,12 @@ class AudioCacheManager {
     _mp3CacheHandler = Mp3CacheHandler();
     await _mp3CacheHandler.init(_cacheDirPath);
 
-    // _internetChecker = InternetChecker(); // NEW: Initialize InternetChecker
+    _internetChecker = InternetChecker();
 
-    // NEW: Pass metadataStore AND internetChecker to HlsCacheHandler
     _hlsCacheHandler = HlsCacheHandler(
       proxyServer: _proxyServer,
       metadataStore: _metadataStore,
-      internetChecker: internetChecker, // NEW: Pass InternetChecker
+      internetChecker: _internetChecker,
     );
 
     _isInitialized = true;
@@ -76,7 +75,6 @@ class AudioCacheManager {
 
     final CacheEntry? existingEntry = await _metadataStore.get(trackId);
     if (existingEntry != null && existingEntry.originalUrl == originalUrl) {
-      // For HLS, check if any segments are complete. For MP3, check if file exists.
       bool isActuallyCached = false;
       if (existingEntry.isHls) {
         isActuallyCached = existingEntry.hlsSegments?.any((s) => s.isComplete) ?? false;
@@ -86,24 +84,23 @@ class AudioCacheManager {
 
       if (isActuallyCached) {
         AppLogger.info('Audio $trackId already cached (or partially cached HLS) and exists on disk. Resuming/Returning existing path.', name: 'AudioCacheManager');
-        // For HLS, we always re-run cacheHls to ensure manifest is up-to-date and resumption continues.
-        // For MP3, we can just return the existing playback URL.
-        if (!isHls) { // Only return directly for MP3s if already cached
+        if (!isHls) {
           return getPlaybackUrl(trackId);
         }
       } else {
         AppLogger.warning('Metadata for $trackId found, but file/segments do not exist. Re-downloading.', name: 'AudioCacheManager');
-        await _metadataStore.delete(trackId); // Clear old metadata if files are missing
+        await _metadataStore.delete(trackId);
       }
     }
 
     AppLogger.info('Caching audio for trackId: $trackId, isHls: $isHls, encrypt: $encrypt', name: 'AudioCacheManager');
 
-    String? playbackUrl; // This will be the URL returned for just_audio
-    int? totalCachedSize; // Total size of completed parts
+    String? playbackUrl;
+    int? totalCachedSize;
+    String? finalDataHash; // To store the hash for MP3s
 
     if (isHls) {
-      final String? localMasterManifestPath = await _hlsCacheHandler.cacheHls(
+      final String? hlsLocalDirPath = await _hlsCacheHandler.cacheHls(
         originalUrl,
         _cacheDirPath,
         trackId,
@@ -111,20 +108,42 @@ class AudioCacheManager {
         encrypt: encrypt,
       );
 
-      if (localMasterManifestPath == null) {
+      if (hlsLocalDirPath == null) {
         AppLogger.error('Failed to cache HLS for track $trackId.', name: 'AudioCacheManager');
         return null;
       }
 
-      // After caching HLS, the metadata store has been updated by HlsCacheHandler.
-      // We need to retrieve the latest entry to get the total size of completed segments.
       final updatedEntry = await _metadataStore.get(trackId);
-      totalCachedSize = updatedEntry?.fileSize ?? 0; // Use the fileSize from the updated entry
+      totalCachedSize = updatedEntry?.fileSize ?? 0;
 
-      // For HLS, we return the file:// URL to the local master manifest.
-      // The master manifest itself contains references to proxy URLs for cached segments
-      // and original URLs for uncached segments.
-      playbackUrl = localMasterManifestPath;
+      playbackUrl = _proxyServer.getProxyUrl(trackId);
+      if (playbackUrl.isEmpty) {
+        AppLogger.error('Proxy URL for HLS master manifest is empty. Cannot play.', name: 'AudioCacheManager');
+        return null;
+      }
+      AppLogger.info('Generated proxy URL for HLS master manifest $trackId: $playbackUrl', name: 'AudioCacheManager');
+
+      if (updatedEntry != null) {
+        await _metadataStore.save(updatedEntry.copyWith(proxyUrl: playbackUrl));
+      } else {
+        final newEntry = CacheEntry(
+          trackId: trackId,
+          originalUrl: originalUrl,
+          filePath: '',
+          timestamp: DateTime.now(),
+          fileSize: totalCachedSize,
+          isEncrypted: encrypt,
+          etag: '',
+          lastModified: '',
+          contentType: 'application/x-mpegURL',
+          proxyUrl: playbackUrl,
+          isHls: true,
+          hlsLocalPath: hlsLocalDirPath,
+          hlsSegments: updatedEntry?.hlsSegments,
+          dataHash: null, // HLS master entry doesn't have a single dataHash
+        );
+        await _metadataStore.save(newEntry);
+      }
 
     } else { // MP3 caching logic
       final Map<String, dynamic>? mp3CacheResult = await _mp3CacheHandler.cacheAudio(
@@ -140,9 +159,9 @@ class AudioCacheManager {
       }
 
       final String localPath = mp3CacheResult['localPath'] as String;
-      totalCachedSize = mp3CacheResult['fileSize'] as int; // This is the final size (encrypted if applicable)
+      totalCachedSize = mp3CacheResult['fileSize'] as int;
+      finalDataHash = mp3CacheResult['dataHash'] as String?; // NEW: Get the dataHash
 
-      // If MP3 is encrypted, its playback URL MUST be through the proxy server.
       if (encrypt) {
         playbackUrl = _proxyServer.getProxyUrl(trackId);
         if (playbackUrl.isEmpty) {
@@ -155,7 +174,6 @@ class AudioCacheManager {
         AppLogger.info('Generated direct file URL for unencrypted MP3 $trackId: $playbackUrl', name: 'AudioCacheManager');
       }
 
-      // Update metadata for MP3 (HLS metadata is handled by HlsCacheHandler saving per segment)
       final newEntry = CacheEntry(
         trackId: trackId,
         originalUrl: originalUrl,
@@ -163,15 +181,14 @@ class AudioCacheManager {
         timestamp: DateTime.now(),
         fileSize: totalCachedSize,
         isEncrypted: encrypt,
-        etag: '', // Not used for MP3 caching in this context
-        lastModified: '', // Not used for MP3 caching in this context
+        etag: '',
+        lastModified: '',
         contentType: 'audio/mpeg',
-        proxyUrl: encrypt ? playbackUrl : '', // Store proxy URL if encrypted
+        proxyUrl: encrypt ? playbackUrl : '',
         isHls: false,
         hlsLocalPath: null,
-        hlsMasterManifestFileName: null,
-        hlsMediaPlaylistFileName: null,
         hlsSegments: null,
+        dataHash: finalDataHash, // NEW: Store the dataHash in CacheEntry
       );
       await _metadataStore.save(newEntry);
     }
@@ -193,23 +210,20 @@ class AudioCacheManager {
 
     try {
       if (entry.isHls) {
-        // For HLS, we always return the file:// URL to the local master manifest.
-        // The manifest itself is dynamically rewritten by HlsCacheHandler to point
-        // to local proxy segments or original URLs.
-        final String localMasterManifestPath = p.join(entry.hlsLocalPath!, entry.hlsMasterManifestFileName!);
-        final File manifestFile = File(localMasterManifestPath);
-        if (await manifestFile.exists()) {
-          AppLogger.info('Returning HLS local master manifest path: $localMasterManifestPath', name: 'AudioCacheManager');
-          return 'file://$localMasterManifestPath';
-        } else {
-          AppLogger.warning('HLS master manifest file not found for trackId: $trackId at $localMasterManifestPath', name: 'AudioCacheManager');
+        final proxyUrl = _proxyServer.getProxyUrl(trackId);
+        if (proxyUrl.isEmpty) {
+          AppLogger.error('Proxy URL for HLS master manifest is empty. Cannot play.', name: 'AudioCacheManager');
           return null;
         }
+        AppLogger.info('Returning HLS proxy URL: $proxyUrl', name: 'AudioCacheManager');
+        return proxyUrl;
       }
       else {
-        // MP3 logic
         final File cachedFile = File(entry.filePath);
         if (await cachedFile.exists()) {
+          // For MP3s, the integrity check for unencrypted files can happen here,
+          // but for encrypted files, it MUST happen in the proxy after decryption.
+          // To simplify, we'll rely on the proxy for all integrity checks on playback.
           if (entry.isEncrypted) {
             final proxyUrl = _proxyServer.getProxyUrl(trackId);
             if (proxyUrl.isEmpty) {
@@ -247,12 +261,12 @@ class AudioCacheManager {
       return false;
     }
     if (entry.isHls) {
-      // For HLS, consider it cached if the directory exists and at least one segment is complete
       final Directory hlsDir = Directory(entry.hlsLocalPath!);
-      return await hlsDir.exists() && (entry.hlsSegments?.any((s) => s.isComplete) ?? false);
+      // For HLS, consider it cached if the directory exists and at least one segment is complete AND has a hash
+      return await hlsDir.exists() && (entry.hlsSegments?.any((s) => s.isComplete && s.dataHash != null) ?? false);
     } else {
-      // For MP3, check if the single file exists
-      return entry.cacheFileEntity.existsSync();
+      // For MP3, check if the file exists AND has a hash
+      return entry.cacheFileEntity.existsSync() && entry.dataHash != null;
     }
   }
 
@@ -313,11 +327,9 @@ class AudioCacheManager {
           }
         }
       }
-      await _metadataStore.clear(); // Clear all metadata
-      // Also delete the base cache directory content to be absolutely sure
+      await _metadataStore.clear();
       final Directory cacheDir = Directory(_cacheDirPath);
       if (await cacheDir.exists()) {
-        // Only delete contents, not the directory itself, as it might be recreated on next init
         await for (var entity in cacheDir.list(recursive: false, followLinks: false)) {
           if (entity is File) {
             await entity.delete();
@@ -350,7 +362,7 @@ class AudioCacheManager {
       AppLogger.error('AudioCacheManager not initialized. Call init() first.', name: 'AudioCacheManager');
       return 0;
     }
-    return _metadataStore.getCurrentCacheSize(); // Delegate to CacheMetadataStore
+    return _metadataStore.getCurrentCacheSize();
   }
 
   /// Cleans up the cache based on size and expiration duration.
@@ -364,7 +376,6 @@ class AudioCacheManager {
     int currentTotalSize = _metadataStore.getCurrentCacheSize();
     final List<String> entriesToDelete = [];
 
-    // 1. Delete expired entries
     final DateTime now = DateTime.now();
     for (final entry in allEntries) {
       if (now.difference(entry.timestamp) > _expirationDuration) {
@@ -448,7 +459,7 @@ class AudioCacheManager {
     if (_isInitialized) {
       _proxyServer.stop();
       _metadataStore.close();
-      // _internetChecker.dispose(); // NEW: Dispose InternetChecker
+      _internetChecker.dispose();
       _isInitialized = false;
       AppLogger.info('AudioCacheManager disposed.', name: 'AudioCacheManager');
     }

@@ -23,12 +23,16 @@ class HlsSegmentEntry extends HiveObject {
   @HiveField(4)
   bool isComplete; // True if fully downloaded and verified
 
+  @HiveField(5) // NEW FIELD FOR DATA INTEGRITY
+  final String? dataHash; // SHA-256 hash of the (decrypted) segment content
+
   HlsSegmentEntry({
     required this.originalUrl,
     required this.localRelativePath,
     this.downloadedBytes = 0,
     this.totalBytes = 0,
     this.isComplete = false,
+    this.dataHash, // NEW
   });
 
   HlsSegmentEntry copyWith({
@@ -37,6 +41,7 @@ class HlsSegmentEntry extends HiveObject {
     int? downloadedBytes,
     int? totalBytes,
     bool? isComplete,
+    String? dataHash, // NEW
   }) {
     return HlsSegmentEntry(
       originalUrl: originalUrl ?? this.originalUrl,
@@ -44,6 +49,8 @@ class HlsSegmentEntry extends HiveObject {
       downloadedBytes: downloadedBytes ?? this.downloadedBytes,
       totalBytes: totalBytes ?? this.totalBytes,
       isComplete: isComplete ?? this.isComplete,
+      dataHash: dataHash ?? this.dataHash, // NEW
     );
   }
+
 }

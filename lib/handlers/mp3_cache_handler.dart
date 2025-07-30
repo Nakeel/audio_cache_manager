@@ -35,81 +35,102 @@ class Mp3CacheHandler {
     return 'mp3_$sanitizedTrackId.mp3';
   }
 
-  /// Downloads and caches an MP3 file. Returns the local path and file size.
+  /// Downloads and caches an MP3 file.
+  /// Returns a map containing 'localPath' and 'fileSize' if successful, null otherwise.
   Future<Map<String, dynamic>?> cacheAudio(
-      String remoteUrl,
+      String mp3Url,
       String trackId, {
         Function(int received, int total)? onProgress,
         bool encrypt = false,
       }) async {
-    if (!_isInitialized) {
-      AppLogger.error('Mp3CacheHandler not initialized.', name: 'Mp3CacheHandler');
-      return null;
-    }
+    AppLogger.info('Attempting to cache MP3: $mp3Url for track $trackId. Encrypt: $encrypt', name: 'Mp3CacheHandler');
 
-    // Declare variables outside try block to ensure scope for finally/catch
+    final String fileName = _getFileName(mp3Url, trackId);
     final String trackSpecificCacheDirPath = p.join(_cacheDirPath, trackId);
     final Directory trackSpecificCacheDir = Directory(trackSpecificCacheDirPath);
-    final String tempFileName = _getFileName(remoteUrl, trackId) + '.tmp';
-    final String finalFileName = _getFileName(remoteUrl, trackId);
-    final String tempFilePath = p.join(trackSpecificCacheDirPath, tempFileName);
-    final String finalFilePath = p.join(trackSpecificCacheDirPath, finalFileName);
+    final String tempFilePath = p.join(trackSpecificCacheDirPath, '$fileName.temp');
+    final String finalFilePath = p.join(trackSpecificCacheDirPath, fileName);
 
     try {
       if (!await trackSpecificCacheDir.exists()) {
         await trackSpecificCacheDir.create(recursive: true);
-        AppLogger.info('Created MP3 track cache directory: ${trackSpecificCacheDir.path}', name: 'Mp3CacheHandler');
+        AppLogger.info('Created track-specific cache directory: ${trackSpecificCacheDir.path}', name: 'Mp3CacheHandler');
       }
 
-      AppLogger.info('Downloading MP3 from $remoteUrl to temporary file: $tempFilePath', name: 'Mp3CacheHandler');
+      // Check if the final file already exists and is complete
+      final File finalFile = File(finalFilePath);
+      if (await finalFile.exists()) {
+        final Uint8List cachedBytes = await finalFile.readAsBytes();
+        // If encrypted, we can't directly hash the raw bytes on disk for integrity.
+        // The integrity check for encrypted files will happen in LocalProxyServer after decryption.
+        // For unencrypted, we can check here.
+        if (!encrypt) {
+          final String calculatedHash = AESHelper.calculateSha256(cachedBytes);
+          // Assuming you have a way to retrieve the expected hash (e.g., from metadata store)
+          // For now, we'll just log that it exists. Full integrity check is on playback.
+          AppLogger.info('MP3 $finalFilePath already exists and will be used.', name: 'Mp3CacheHandler');
+          return {
+            'localPath': finalFilePath,
+            'fileSize': cachedBytes.length,
+            'dataHash': calculatedHash, // Return hash for unencrypted, if needed
+          };
+        } else {
+          AppLogger.info('Encrypted MP3 $finalFilePath already exists. Integrity check deferred to proxy.', name: 'Mp3CacheHandler');
+          return {
+            'localPath': finalFilePath,
+            'fileSize': cachedBytes.length,
+            'dataHash': null, // Hash will be calculated after decryption in proxy
+          };
+        }
+      }
 
+      // Download to a temporary file first
+      AppLogger.info('Downloading MP3 to temporary file: $tempFilePath', name: 'Mp3CacheHandler');
       await _dio.download(
-        remoteUrl,
+        mp3Url,
         tempFilePath,
         onReceiveProgress: (received, total) {
-          onProgress?.call(received, total);
+          if (onProgress != null) {
+            onProgress(received, total);
+          }
         },
-        options: Options(responseType: ResponseType.bytes),
       );
+      AppLogger.info('MP3 downloaded to temporary file: $tempFilePath', name: 'Mp3CacheHandler');
 
-      final tempFile = File(tempFilePath);
-      if (!await tempFile.exists()) {
-        AppLogger.error('Temporary file not created after download: $tempFilePath', name: 'Mp3CacheHandler');
-        return null;
-      }
+      Uint8List fileBytes = await File(tempFilePath).readAsBytes();
+      final int originalFileSize = fileBytes.length;
+      String? dataHash;
 
-      Uint8List fileBytes = await tempFile.readAsBytes();
-      final int originalFileSize = fileBytes.length; // Store original size before encryption
+      // Calculate hash of the original (decrypted) content
+      dataHash = AESHelper.calculateSha256(fileBytes);
+      AppLogger.info('Calculated SHA-256 hash of original content: $dataHash', name: 'Mp3CacheHandler');
 
-      // --- ENCRYPTION LOGIC ---
       if (encrypt) {
-        AppLogger.info('Encrypting audio for $remoteUrl', name: 'Mp3CacheHandler');
+        AppLogger.info('Encrypting MP3 file: $finalFilePath', name: 'Mp3CacheHandler');
         fileBytes = AESHelper.encrypt(fileBytes); // Encrypt the bytes
       }
-      // --- END ENCRYPTION LOGIC ---
 
-      final File finalFile = File(finalFilePath);
-      await finalFile.writeAsBytes(fileBytes); // Write encrypted or unencrypted bytes
+      // Move from temporary to final path
+      await File(tempFilePath).rename(finalFilePath);
 
-      AppLogger.info('MP3 $finalFileName saved to $finalFilePath, size: ${fileBytes.length} bytes (Original: $originalFileSize bytes). Encrypted: $encrypt', name: 'Mp3CacheHandler');
-      await tempFile.delete(); // Delete temporary file
+      AppLogger.info('MP3  saved to $finalFilePath, size: ${fileBytes.length} bytes (Original: $originalFileSize bytes). Encrypted: $encrypt', name: 'Mp3CacheHandler');
 
       return {
         'localPath': finalFilePath,
         'fileSize': fileBytes.length, // Return the size of the written file (encrypted size if encrypted)
-        // If original size is critical for validation later, you might store it here as well
+        'dataHash': dataHash, // Store the hash of the original (decrypted) content
       };
     } catch (e, st) {
       AppLogger.error('Error downloading or saving MP3: $e', error: e, stackTrace: st, name: 'Mp3CacheHandler');
       // Clean up temporary file if an error occurs
-      final tempFile = File(tempFilePath); // Now tempFilePath is in scope
+      final File tempFile = File(tempFilePath);
       if (await tempFile.exists()) {
         await tempFile.delete();
       }
       // Ensure the newly created track-specific directory is also cleaned up if empty
       if (await trackSpecificCacheDir.exists()) {
         final List<FileSystemEntity> contents = trackSpecificCacheDir.listSync(recursive: false);
-        if (contents.isEmpty) { // Only delete if it's empty
+        if (contents.isEmpty) {
           await trackSpecificCacheDir.delete();
           AppLogger.info('Cleaned up empty MP3 track directory: ${trackSpecificCacheDir.path}', name: 'Mp3CacheHandler');
         }

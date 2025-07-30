@@ -36,7 +36,7 @@ class CacheEntry extends HiveObject {
   final String contentType;
 
   @HiveField(9)
-  final String proxyUrl;
+  final String proxyUrl; // This will be the internal http proxy path for the main entry
 
   // --- New fields for HLS caching ---
   @HiveField(10)
@@ -45,11 +45,10 @@ class CacheEntry extends HiveObject {
   @HiveField(11)
   final String? hlsLocalPath; // Base directory for HLS segments and manifests
   @HiveField(12)
-  final String? hlsMasterManifestFileName; // Name of the master manifest file in hlsLocalPath
-  @HiveField(13)
-  final String? hlsMediaPlaylistFileName; // Name of the media playlist (variant) file in hlsLocalPath
-  @HiveField(14)
-  final List<HlsSegmentEntry>? hlsSegments; // NEW: List of individual HLS segment statuses
+  final List<HlsSegmentEntry>? hlsSegments; // List of individual HLS segment statuses
+
+  @HiveField(13) // NEW FIELD FOR DATA INTEGRITY
+  final String? dataHash; // SHA-256 hash of the (decrypted) content for MP3s
 
   CacheEntry({
     required this.trackId,
@@ -64,9 +63,8 @@ class CacheEntry extends HiveObject {
     required this.proxyUrl,
     this.isHls = false,
     this.hlsLocalPath,
-    this.hlsMasterManifestFileName, // Initialize new fields
-    this.hlsMediaPlaylistFileName, // Initialize new fields
-    this.hlsSegments, // Initialize new fields
+    this.hlsSegments,
+    this.dataHash, // NEW
   });
 
   CacheEntry copyWith({
@@ -82,9 +80,8 @@ class CacheEntry extends HiveObject {
     String? proxyUrl,
     bool? isHls,
     String? hlsLocalPath,
-    String? hlsMasterManifestFileName,
-    String? hlsMediaPlaylistFileName,
     List<HlsSegmentEntry>? hlsSegments,
+    String? dataHash, // NEW
   }) {
     return CacheEntry(
       trackId: trackId ?? this.trackId,
@@ -99,20 +96,17 @@ class CacheEntry extends HiveObject {
       proxyUrl: proxyUrl ?? this.proxyUrl,
       isHls: isHls ?? this.isHls,
       hlsLocalPath: hlsLocalPath ?? this.hlsLocalPath,
-      hlsMasterManifestFileName: hlsMasterManifestFileName ?? this.hlsMasterManifestFileName,
-      hlsMediaPlaylistFileName: hlsMediaPlaylistFileName ?? this.hlsMediaPlaylistFileName,
       hlsSegments: hlsSegments ?? this.hlsSegments,
+      dataHash: dataHash ?? this.dataHash, // NEW
     );
   }
 
-  // Helper getter to determine the actual file system entity (File or Directory)
   FileSystemEntity get cacheFileEntity {
     if (isHls) {
-      // For HLS, hlsLocalPath stores the base directory of the cached HLS stream
       return Directory(hlsLocalPath!);
     } else {
-      // For MP3s/single files, filePath points to the actual file
       return File(filePath);
     }
   }
 }
+

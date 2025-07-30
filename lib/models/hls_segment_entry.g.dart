@@ -22,13 +22,14 @@ class HlsSegmentEntryAdapter extends TypeAdapter<HlsSegmentEntry> {
       downloadedBytes: fields[2] as int,
       totalBytes: fields[3] as int,
       isComplete: fields[4] as bool,
+      dataHash: fields[5] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, HlsSegmentEntry obj) {
     writer
-      ..writeByte(5)
+      ..writeByte(6)
       ..writeByte(0)
       ..write(obj.originalUrl)
       ..writeByte(1)
@@ -38,7 +39,9 @@ class HlsSegmentEntryAdapter extends TypeAdapter<HlsSegmentEntry> {
       ..writeByte(3)
       ..write(obj.totalBytes)
       ..writeByte(4)
-      ..write(obj.isComplete);
+      ..write(obj.isComplete)
+      ..writeByte(5)
+      ..write(obj.dataHash);
   }
 
   @override

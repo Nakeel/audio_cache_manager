@@ -28,6 +28,7 @@ dependencies:
   uuid: ^4.3.3
   async: ^2.11.0
 #  shelf_io: any
+  connectivity_plus: # Detects Wi-Fi/Mobile connection
 
 
 dev_dependencies:
