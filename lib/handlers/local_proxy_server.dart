@@ -63,8 +63,8 @@ class LocalProxyServer {
         String rewrittenManifestContent = _rewriteHlsMasterManifest(originalManifestContent, trackId, port, entry.hlsLocalPath!);
 
         AppLogger.info('Serving rewritten HLS Master Manifest for $trackId. Content length: ${rewrittenManifestContent.length}', name: 'LocalProxyServer');
-        // Log a snippet of the rewritten manifest for debugging
-        AppLogger.info('Rewritten Master Manifest Snippet:\n${rewrittenManifestContent.substring(0, rewrittenManifestContent.length > 500 ? 500 : rewrittenManifestContent.length)}...', name: 'LocalProxyServer');
+        // Log the ENTIRE rewritten manifest for debugging
+        AppLogger.info('FULL Rewritten Master Manifest Content:\n$rewrittenManifestContent', name: 'LocalProxyServer');
 
 
         return Response.ok(rewrittenManifestContent, headers: {
@@ -140,8 +140,8 @@ class LocalProxyServer {
         String rewrittenMediaPlaylistContent = _rewriteHlsMediaPlaylist(originalMediaPlaylistContent, trackId, port, entry.hlsSegments, p.dirname(path));
 
         AppLogger.info('Serving rewritten HLS Media Playlist for $trackId, path: $path. Content length: ${rewrittenMediaPlaylistContent.length}', name: 'LocalProxyServer');
-        // Log a snippet of the rewritten manifest for debugging
-        AppLogger.info('Rewritten Media Playlist Snippet:\n${rewrittenMediaPlaylistContent.substring(0, rewrittenMediaPlaylistContent.length > 500 ? 500 : rewrittenMediaPlaylistContent.length)}...', name: 'LocalProxyServer');
+        // Log the ENTIRE rewritten manifest for debugging
+        AppLogger.info('FULL Rewritten Media Playlist Content:\n$rewrittenMediaPlaylistContent', name: 'LocalProxyServer');
 
         return Response.ok(rewrittenMediaPlaylistContent, headers: {
           'Content-Type': contentType,
