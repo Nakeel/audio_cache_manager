@@ -45,6 +45,8 @@ class LocalProxyServer {
       AppLogger.info('Serving request for track: $trackId, isHls: ${entry.isHls}, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
 
       if (entry.isHls) {
+        // For HLS, this route serves the master manifest.
+        // It needs to be dynamically rewritten to include the current port.
         if (entry.hlsLocalPath == null) {
           AppLogger.error('HLS local path is null for track $trackId', name: 'LocalProxyServer');
           return Response.internalServerError(body: 'HLS local path missing.');
@@ -61,9 +63,12 @@ class LocalProxyServer {
         String rewrittenManifestContent = _rewriteHlsMasterManifest(originalManifestContent, trackId, port, entry.hlsLocalPath!);
 
         return Response.ok(rewrittenManifestContent, headers: {
-          'Content-Type': 'application/x-mpegURL',
+          'Content-Type': 'application/x-mpegURL', // Correct MIME type for M3U8
           'Content-Length': rewrittenManifestContent.length.toString(),
-          'Accept-Ranges': 'bytes',
+          'Accept-Ranges': 'bytes', // Indicate support for range requests
+          'Cache-Control': 'no-cache, no-store, must-revalidate', // Prevent client caching of this manifest
+          'Pragma': 'no-cache',
+          'Expires': '0',
         });
       } else {
         // --- MP3 LOGIC WITH INTEGRITY CHECK ---
@@ -74,19 +79,18 @@ class LocalProxyServer {
         }
 
         Uint8List fileBytes = await cachedFile.readAsBytes();
-        Uint8List contentToHash = fileBytes; // Default to raw bytes for hashing
+        Uint8List contentToHash = fileBytes;
 
         if (entry.isEncrypted) {
           AppLogger.info('Proxy server decrypting content for MP3 $trackId', name: 'LocalProxyServer');
           try {
-            contentToHash = AESHelper.decrypt(fileBytes); // Decrypt to get original content for hashing
+            contentToHash = AESHelper.decrypt(fileBytes);
           } catch (e, st) {
             AppLogger.error('Error decrypting MP3 file $trackId from proxy: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
             return Response.internalServerError(body: 'Error decrypting audio: $e');
           }
         }
 
-        // NEW: Perform integrity check
         if (entry.dataHash != null && !AESHelper.verifyIntegrity(contentToHash, entry.dataHash!)) {
           AppLogger.error('Data integrity check failed for MP3 track $trackId. Stored hash: ${entry.dataHash}, Calculated hash: ${AESHelper.calculateSha256(contentToHash)}', name: 'LocalProxyServer');
           return Response.internalServerError(body: 'Data integrity check failed for audio track.');
@@ -96,7 +100,7 @@ class LocalProxyServer {
           AppLogger.info('Data integrity check passed for MP3 track $trackId.', name: 'LocalProxyServer');
         }
 
-        return Response.ok(contentToHash, headers: { // Serve the decrypted content
+        return Response.ok(contentToHash, headers: {
           'Content-Type': entry.contentType,
           'Content-Length': contentToHash.length.toString(),
           'Accept-Ranges': 'bytes',
@@ -129,24 +133,26 @@ class LocalProxyServer {
           'Content-Type': contentType,
           'Content-Length': rewrittenMediaPlaylistContent.length.toString(),
           'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-cache, no-store, must-revalidate', // Prevent client caching of this manifest
+          'Pragma': 'no-cache',
+          'Expires': '0',
         });
       } else if (path.endsWith('.ts')) {
-        contentType = 'video/mp2t'; // MPEG-2 Transport Stream
+        contentType = 'video/mp2t'; // Correct MIME type for MPEG-2 Transport Stream
         Uint8List fileBytes = await hlsFile.readAsBytes();
-        Uint8List contentToHash = fileBytes; // Default to raw bytes for hashing
+        Uint8List contentToHash = fileBytes;
 
         AppLogger.info('Serving HLS segment: $path for track $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
         if (entry.isEncrypted) {
           AppLogger.info('Proxy server decrypting HLS segment: $path for track $trackId', name: 'LocalProxyServer');
           try {
-            contentToHash = AESHelper.decrypt(fileBytes); // Decrypt to get original content for hashing
+            contentToHash = AESHelper.decrypt(fileBytes);
           } catch (e, st) {
             AppLogger.error('Error decrypting HLS segment $path for track $trackId: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
             return Response.internalServerError(body: 'Error decrypting HLS segment: $e');
           }
         }
 
-        // NEW: Perform integrity check for the specific segment
         final HlsSegmentEntry? segmentEntry = entry.hlsSegments?.firstWhereOrNull((s) => s.localRelativePath == path);
         if (segmentEntry != null && segmentEntry.dataHash != null && !AESHelper.verifyIntegrity(contentToHash, segmentEntry.dataHash!)) {
           AppLogger.error('Data integrity check failed for HLS segment $path (track $trackId). Stored hash: ${segmentEntry.dataHash}, Calculated hash: ${AESHelper.calculateSha256(contentToHash)}', name: 'LocalProxyServer');
@@ -157,7 +163,7 @@ class LocalProxyServer {
           AppLogger.info('Data integrity check passed for HLS segment $path (track $trackId).', name: 'LocalProxyServer');
         }
 
-        return Response.ok(contentToHash, headers: { // Serve the decrypted content
+        return Response.ok(contentToHash, headers: {
           'Content-Type': contentType,
           'Content-Length': contentToHash.length.toString(),
           'Accept-Ranges': 'bytes',
@@ -179,7 +185,6 @@ class LocalProxyServer {
     }
   }
 
-  /// Helper to get the full proxy URL for a given trackId (for MP3s or main HLS master manifest).
   String getProxyUrl(String trackId) {
     if (_server == null || _port == 0) {
       AppLogger.warning('Proxy server not running. Cannot generate proxy URL for trackId: $trackId', name: 'LocalProxyServer');
@@ -188,15 +193,11 @@ class LocalProxyServer {
     return 'http://$host:${_server!.port}/audio/$trackId';
   }
 
-  /// Helper to get the full proxy URL for an HLS segment or sub-manifest.
-  /// This is used internally by the rewritten manifests.
   String _getHlsSegmentOrManifestProxyUrl(String trackId, String relativePath, int currentPort) {
     final encodedPath = Uri.encodeComponent(relativePath);
     return 'http://$host:$currentPort/hls_segments/$trackId/$encodedPath';
   }
 
-  /// Dynamically rewrites the HLS master manifest to point to the media playlist
-  /// via the proxy server with the current port.
   String _rewriteHlsMasterManifest(String masterManifestContent, String trackId, int currentPort, String hlsLocalPath) {
     final String mediaPlaylistRelativePath = _mediaPlaylistFileName;
     final RegExp streamInfPattern = RegExp(r'^(#EXT-X-STREAM-INF.*)\n(?!#)(.*)', multiLine: true);
@@ -209,15 +210,16 @@ class LocalProxyServer {
     });
   }
 
-  /// Dynamically rewrites an HLS media playlist to point to segments
-  /// via the proxy server with the current port, or keep original if not cached.
   String _rewriteHlsMediaPlaylist(String mediaPlaylistContent, String trackId, int currentPort, List<HlsSegmentEntry>? cachedSegments, String currentManifestRelativeDir) {
     final RegExp urlPattern = RegExp(r'^(?!#)(.*\\.ts|.*\\.m3u8)$', multiLine: true);
 
     return mediaPlaylistContent.replaceAllMapped(urlPattern, (match) {
       String originalRelativePath = match.group(1)!;
 
+      // Normalize the path to match how it's stored in HlsSegmentEntry
       final String segmentLocalRelativePath = p.normalize(p.join(currentManifestRelativeDir, originalRelativePath));
+      AppLogger.info('Rewriting media playlist: Original relative path: $originalRelativePath, Normalized local path: $segmentLocalRelativePath', name: 'LocalProxyRewrite');
+
 
       final HlsSegmentEntry? segmentEntry = cachedSegments?.firstWhereOrNull((s) => s.localRelativePath == segmentLocalRelativePath);
 
