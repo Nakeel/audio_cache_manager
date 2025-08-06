@@ -56,6 +56,8 @@ class LocalProxyServer {
           'Content-Type': 'application/x-mpegURL', // MIME type for M3U8
           'Content-Length': manifestContent.length.toString(),
           'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache',
         });
       } else {
         // --- EXISTING MP3 LOGIC ---
@@ -78,6 +80,8 @@ class LocalProxyServer {
           'Content-Type': entry.contentType,
           'Content-Length': fileBytes.length.toString(),
           'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache',
         });
       }
     });
@@ -130,6 +134,8 @@ class LocalProxyServer {
         'Content-Type': contentType,
         'Content-Length': fileBytes.length.toString(),
         'Accept-Ranges': 'bytes',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache',
       });
     });
 
