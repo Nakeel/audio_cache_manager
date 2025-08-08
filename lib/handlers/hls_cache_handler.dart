@@ -437,18 +437,25 @@ class HlsCacheHandler {
           if (streamInfIndex + 1 < masterManifestContent.split('\n').length) {
             String uriLine = masterManifestContent.split('\n')[streamInfIndex + 1].trim();
             if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
-              String relativePathToMediaPlaylist = p.basename(uriLine);
-              finalMasterManifestContent += '$relativePathToMediaPlaylist\n';
+              // Instead of using relative paths, use the proxy URL
+              String localMediaPlaylistFileName = p.basename(Uri.parse(uriLine).path);
+              String proxyMediaPlaylistUrl = _proxyServer.getHlsManifestProxyUrl(trackId, localMediaPlaylistFileName);
+              finalMasterManifestContent += '$proxyMediaPlaylistUrl\n';
+              AppLogger.info('Rewrote master manifest media playlist to proxy URL: $proxyMediaPlaylistUrl', name: 'HlsCacheHandler');
             }
           }
         } else {
           finalMasterManifestContent += line + '\n';
         }
       }
-
       final String localMasterManifestFileName = p.basename(hlsUri.path);
       final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
       await localMasterManifestFile.writeAsString(finalMasterManifestContent);
+      AppLogger.info('Rewritten HLS master manifest saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
+
+      //
+      // final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
+      // await localMasterManifestFile.writeAsString(finalMasterManifestContent);
       AppLogger.info('Rewritten master manifest saved: ${localMasterManifestFile.path}\nContent:\n$finalMasterManifestContent', name: 'HlsCacheHandler');
 
       return localMasterManifestFile.path;

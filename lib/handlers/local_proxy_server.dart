@@ -254,24 +254,52 @@ class LocalProxyServer {
 
     final Router _router = Router();
 
+    // _router.get('/audio/<trackId>', (Request request, String trackId) async {
+    //   AppLogger.info('Request for HLS manifest: $trackId, headers: ${request.headers}', name: 'LocalProxyServer');
+    //   final CacheEntry? entry = await metadataStore.get(trackId);
+    //   if (entry == null || !entry.isHls || entry.hlsManifestFilePath == null) {
+    //     AppLogger.error('Track $trackId not found or not HLS', name: 'LocalProxyServer');
+    //     return Response.notFound('Track not found or not HLS');
+    //   }
+    //
+    //   final File manifestFile = File(entry.hlsManifestFilePath!);
+    //   if (!await manifestFile.exists()) {
+    //     AppLogger.error('HLS master manifest not found: ${entry.hlsManifestFilePath}', name: 'LocalProxyServer');
+    //     return Response.internalServerError(body: 'HLS manifest not found.');
+    //   }
+    //
+    //   String manifestContent = await manifestFile.readAsString();
+    //   manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
+    //   AppLogger.info('Serving HLS master manifest for $trackId, content length: ${manifestContent.length}', name: 'LocalProxyServer');
+    //
+    //   return Response.ok(manifestContent, headers: {
+    //     'Content-Type': 'application/x-mpegURL',
+    //     'Content-Length': manifestContent.length.toString(),
+    //     'Accept-Ranges': 'bytes',
+    //     'Access-Control-Allow-Origin': '*',
+    //     'Cache-Control': 'no-cache',
+    //   });
+    // });
+
     _router.get('/audio/<trackId>', (Request request, String trackId) async {
-      AppLogger.info('Request for HLS manifest: $trackId, headers: ${request.headers}', name: 'LocalProxyServer');
       final CacheEntry? entry = await metadataStore.get(trackId);
-      if (entry == null || !entry.isHls || entry.hlsManifestFilePath == null) {
-        AppLogger.error('Track $trackId not found or not HLS', name: 'LocalProxyServer');
-        return Response.notFound('Track not found or not HLS');
+      if (entry == null || !entry.isHls) {
+        return Response.notFound('Track not found');
       }
-
-      final File manifestFile = File(entry.hlsManifestFilePath!);
+      final String localManifestPath = entry.hlsManifestFilePath!;
+      final File manifestFile = File(localManifestPath);
       if (!await manifestFile.exists()) {
-        AppLogger.error('HLS master manifest not found: ${entry.hlsManifestFilePath}', name: 'LocalProxyServer');
-        return Response.internalServerError(body: 'HLS manifest not found.');
+        AppLogger.error('HLS master manifest not found: $localManifestPath', name: 'LocalProxyServer');
+        return Response.notFound('HLS manifest not found');
       }
-
+      // Verify segments exist
+      final Directory hlsDir = Directory(entry.hlsLocalPath!);
+      if (!await hlsDir.exists()) {
+        AppLogger.error('HLS cache directory missing: ${entry.hlsLocalPath}', name: 'LocalProxyServer');
+        return Response.notFound('HLS cache directory not found');
+      }
       String manifestContent = await manifestFile.readAsString();
       manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
-      AppLogger.info('Serving HLS master manifest for $trackId, content length: ${manifestContent.length}', name: 'LocalProxyServer');
-
       return Response.ok(manifestContent, headers: {
         'Content-Type': 'application/x-mpegURL',
         'Content-Length': manifestContent.length.toString(),
@@ -376,20 +404,36 @@ class LocalProxyServer {
     return 'http://$host:${_server!.port}/audio/$trackId';
   }
 
+  // String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_segments'}) {
+  //   if (!proxySegmentRoute.startsWith('/')) {
+  //     proxySegmentRoute = '/$proxySegmentRoute';
+  //   }
+  //   final RegExp urlPattern = RegExp(r'^(?!#)(.*\.ts|.*\.m3u8)$', multiLine: true);
+  //   final rewrittenContent = manifestContent.replaceAllMapped(urlPattern, (match) {
+  //     String originalPath = match.group(1)!;
+  //     final String resolvedPath = p.join(p.dirname(basePath), originalPath);
+  //     final String fullProxyPath = 'http://127.0.0.1:$port$proxySegmentRoute/$trackId/$resolvedPath';
+  //     AppLogger.info('Rewriting HLS URL: $originalPath to $fullProxyPath', name: 'HlsProxyRewrite');
+  //     return fullProxyPath;
+  //   });
+  //   AppLogger.info('Rewritten HLS manifest for track $trackId:\n$rewrittenContent', name: 'LocalProxyServer');
+  //   return rewrittenContent;
+  // }
+
   String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_segments'}) {
     if (!proxySegmentRoute.startsWith('/')) {
       proxySegmentRoute = '/$proxySegmentRoute';
     }
     final RegExp urlPattern = RegExp(r'^(?!#)(.*\.ts|.*\.m3u8)$', multiLine: true);
-    final rewrittenContent = manifestContent.replaceAllMapped(urlPattern, (match) {
+    return manifestContent.replaceAllMapped(urlPattern, (match) {
       String originalPath = match.group(1)!;
       final String resolvedPath = p.join(p.dirname(basePath), originalPath);
       final String fullProxyPath = 'http://127.0.0.1:$port$proxySegmentRoute/$trackId/$resolvedPath';
-      AppLogger.info('Rewriting HLS URL: $originalPath to $fullProxyPath', name: 'HlsProxyRewrite');
+      AppLogger.info('Rewriting HLS URL: $originalPath to $fullProxyPath', name: 'LocalProxyServer');
       return fullProxyPath;
     });
-    AppLogger.info('Rewritten HLS manifest for track $trackId:\n$rewrittenContent', name: 'LocalProxyServer');
-    return rewrittenContent;
+    // AppLogger.info('Rewritten HLS manifest for track $trackId:\n$rewrittenContent', name: 'LocalProxyServer');
+    // return rewrittenContent;
   }
 
   Future<void> stop() async {
