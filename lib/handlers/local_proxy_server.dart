@@ -424,7 +424,7 @@ class LocalProxyServer {
     if (!proxySegmentRoute.startsWith('/')) {
       proxySegmentRoute = '/$proxySegmentRoute';
     }
-    final RegExp urlPattern = RegExp(r'^(?!#)(.*\.ts|.*\.m3u8)$', multiLine: true);
+    final RegExp urlPattern = RegExp(r'^(?!#)(.*\.m3u8|.*\.ts)$', multiLine: true);
     return manifestContent.replaceAllMapped(urlPattern, (match) {
       String originalPath = match.group(1)!;
       final String resolvedPath = p.join(p.dirname(basePath), originalPath);
@@ -432,8 +432,6 @@ class LocalProxyServer {
       AppLogger.info('Rewriting HLS URL: $originalPath to $fullProxyPath', name: 'LocalProxyServer');
       return fullProxyPath;
     });
-    // AppLogger.info('Rewritten HLS manifest for track $trackId:\n$rewrittenContent', name: 'LocalProxyServer');
-    // return rewrittenContent;
   }
 
   Future<void> stop() async {

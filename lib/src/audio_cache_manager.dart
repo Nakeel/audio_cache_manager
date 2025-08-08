@@ -45,7 +45,7 @@ class AudioCacheManager {
     _mp3CacheHandler = Mp3CacheHandler();
     await _mp3CacheHandler.init(_cacheDirPath);
 
-    _hlsCacheHandler = HlsCacheHandler(proxyServer: _proxyServer);
+    _hlsCacheHandler = HlsCacheHandler( _proxyServer);
 
     _isInitialized = true;
     AppLogger.info('AudioCacheManager initialized. Cache directory: $_cacheDirPath', name: 'AudioCacheManager');

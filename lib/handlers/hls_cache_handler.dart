@@ -276,11 +276,12 @@ import 'package:audio_cache_manager/utils/app_logger.dart';
 import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
 
 class HlsCacheHandler {
-  static const int _maxSegmentRetries = 3;
-  static const Duration _retryDelay = Duration(seconds: 2);
+  final http.Client _httpClient = http.Client();
   final LocalProxyServer _proxyServer;
+  final int _maxSegmentRetries = 3;
+  final Duration _retryDelay = Duration(milliseconds: 500);
 
-  HlsCacheHandler({required LocalProxyServer proxyServer}) : _proxyServer = proxyServer;
+  HlsCacheHandler(this._proxyServer);
 
   Future<String?> cacheHls(
       String hlsUrl,
@@ -301,7 +302,7 @@ class HlsCacheHandler {
       }
 
       // Download master manifest
-      final http.Response masterManifestResponse = await http.get(hlsUri);
+      final http.Response masterManifestResponse = await _httpClient.get(hlsUri);
       if (masterManifestResponse.statusCode != 200) {
         AppLogger.error('Failed to download master manifest: ${masterManifestResponse.statusCode}', name: 'HlsCacheHandler');
         throw Exception('Failed to download master manifest');
@@ -316,30 +317,47 @@ class HlsCacheHandler {
         throw Exception('Invalid master manifest');
       }
 
+      // Select audio-only media playlist
       List<String> mediaPlaylistUrls = [];
       List<String> lines = masterManifestContent.split('\n');
+      String? selectedMediaPlaylistUrl;
       for (int i = 0; i < lines.length; i++) {
         String line = lines[i].trim();
-        if (line.startsWith('#EXT-X-STREAM-INF')) {
+        if (line.startsWith('#EXT-X-STREAM-INF') && line.contains('CODECS="mp4a.40.2"') && !line.contains('avc1')) {
           if (i + 1 < lines.length) {
             String uriLine = lines[i + 1].trim();
             if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
-              mediaPlaylistUrls.add(uriLine);
+              selectedMediaPlaylistUrl = _resolveUri(baseUri, uriLine).toString();
+              AppLogger.info('Selected audio-only media playlist: $selectedMediaPlaylistUrl', name: 'HlsCacheHandler');
+              break;
             }
           }
         }
       }
 
-      if (mediaPlaylistUrls.isEmpty) {
-        AppLogger.info('No #EXT-X-STREAM-INF found, assuming single media playlist', name: 'HlsCacheHandler');
-        mediaPlaylistUrls.add(hlsUrl);
+      if (selectedMediaPlaylistUrl == null) {
+        AppLogger.info('No audio-only playlist found, using first media playlist', name: 'HlsCacheHandler');
+        for (int i = 0; i < lines.length; i++) {
+          String line = lines[i].trim();
+          if (line.startsWith('#EXT-X-STREAM-INF')) {
+            if (i + 1 < lines.length) {
+              String uriLine = lines[i + 1].trim();
+              if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
+                selectedMediaPlaylistUrl = _resolveUri(baseUri, uriLine).toString();
+                break;
+              }
+            }
+          }
+        }
       }
 
-      String? selectedMediaPlaylistUrl = _resolveUri(baseUri, mediaPlaylistUrls.first).toString();
-      AppLogger.info('Selected media playlist: $selectedMediaPlaylistUrl', name: 'HlsCacheHandler');
+      if (selectedMediaPlaylistUrl == null) {
+        AppLogger.error('No valid media playlist found', name: 'HlsCacheHandler');
+        throw Exception('No valid media playlist');
+      }
 
       // Download media playlist
-      final http.Response mediaPlaylistResponse = await http.get(Uri.parse(selectedMediaPlaylistUrl));
+      final http.Response mediaPlaylistResponse = await _httpClient.get(Uri.parse(selectedMediaPlaylistUrl));
       if (mediaPlaylistResponse.statusCode != 200) {
         AppLogger.error('Failed to download media playlist: ${mediaPlaylistResponse.statusCode}', name: 'HlsCacheHandler');
         throw Exception('Failed to download media playlist');
@@ -354,11 +372,12 @@ class HlsCacheHandler {
         throw Exception('Invalid media playlist format');
       }
 
+      // Extract segment URLs, skipping HMAC lines
       List<String> segmentUrls = [];
       List<String> mediaPlaylistLines = mediaPlaylistContent.split('\n');
-      for (String line in mediaPlaylistLines) {
-        String trimmedLine = line.trim();
-        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+      for (int i = 0; i < mediaPlaylistLines.length; i++) {
+        String trimmedLine = mediaPlaylistLines[i].trim();
+        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#') && !trimmedLine.contains('~hmac=')) {
           segmentUrls.add(_resolveUri(mediaPlaylistBaseUri, trimmedLine).toString());
         }
       }
@@ -370,17 +389,16 @@ class HlsCacheHandler {
       }
 
       // Download segments
-      for (String segmentUrl in segmentUrls) {
+      for (int i = 0; i < segmentUrls.length; i++) {
         int retries = 0;
         bool success = false;
+        String segmentUrl = segmentUrls[i];
+        String segmentFileName = 'segment_$i.ts';
+        String segmentPath = p.join(hlsCacheDirPath, segmentFileName);
         while (retries < _maxSegmentRetries && !success) {
           try {
-            final Uri segmentUri = Uri.parse(segmentUrl);
-            final String segmentFileName = p.basename(segmentUri.path);
-            final String segmentPath = p.join(hlsCacheDirPath, segmentFileName);
             final File segmentFile = File(segmentPath);
-
-            final http.Response segmentResponse = await http.get(segmentUri);
+            final http.Response segmentResponse = await _httpClient.get(Uri.parse(segmentUrl));
             if (segmentResponse.statusCode != 200) {
               AppLogger.error('Failed to download segment $segmentUrl: ${segmentResponse.statusCode}', name: 'HlsCacheHandler');
               retries++;
@@ -389,6 +407,10 @@ class HlsCacheHandler {
             }
 
             Uint8List segmentBytes = segmentResponse.bodyBytes;
+            if (segmentBytes.isEmpty) {
+              AppLogger.error('Empty segment downloaded: $segmentUrl', name: 'HlsCacheHandler');
+              throw Exception('Empty segment');
+            }
             if (encrypt) {
               segmentBytes = AESHelper.encrypt(segmentBytes);
             }
@@ -410,13 +432,16 @@ class HlsCacheHandler {
         }
       }
 
-      // Rewrite media playlist
+      // Rewrite media playlist with proxy URLs
       String finalMediaPlaylistContent = '';
+      int segmentIndex = 0;
       for (String line in mediaPlaylistLines) {
         String trimmedLine = line.trim();
-        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
-          final String relativeSegmentPath = p.basename(trimmedLine);
-          finalMediaPlaylistContent += '$relativeSegmentPath\n';
+        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#') && !trimmedLine.contains('~hmac=')) {
+          final String segmentFileName = 'segment_$segmentIndex.ts';
+          final String proxySegmentUrl = 'http://127.0.0.1:${_proxyServer.port}/hls_segments/$trackId/$segmentFileName';
+          finalMediaPlaylistContent += '$proxySegmentUrl\n';
+          segmentIndex++;
         } else {
           finalMediaPlaylistContent += '$line\n';
         }
@@ -429,34 +454,31 @@ class HlsCacheHandler {
 
       // Rewrite master manifest
       String finalMasterManifestContent = '';
+      bool wroteMediaPlaylist = false;
       for (String line in masterManifestContent.split('\n')) {
         String trimmedLine = line.trim();
         if (trimmedLine.startsWith('#EXT-X-STREAM-INF')) {
-          finalMasterManifestContent += line + '\n';
-          int streamInfIndex = masterManifestContent.split('\n').indexOf(line);
-          if (streamInfIndex + 1 < masterManifestContent.split('\n').length) {
-            String uriLine = masterManifestContent.split('\n')[streamInfIndex + 1].trim();
-            if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
-              // Instead of using relative paths, use the proxy URL
-              String localMediaPlaylistFileName = p.basename(Uri.parse(uriLine).path);
-              String proxyMediaPlaylistUrl = _proxyServer.getHlsManifestProxyUrl(trackId, localMediaPlaylistFileName);
-              finalMasterManifestContent += '$proxyMediaPlaylistUrl\n';
-              AppLogger.info('Rewrote master manifest media playlist to proxy URL: $proxyMediaPlaylistUrl', name: 'HlsCacheHandler');
-            }
+          if (!trimmedLine.contains('avc1') && trimmedLine.contains('mp4a.40.2')) {
+            finalMasterManifestContent += line + '\n';
+            String proxyMediaPlaylistUrl = _proxyServer.getHlsManifestProxyUrl(trackId, localMediaPlaylistFileName);
+            finalMasterManifestContent += '$proxyMediaPlaylistUrl\n';
+            AppLogger.info('Rewrote master manifest media playlist to proxy URL: $proxyMediaPlaylistUrl', name: 'HlsCacheHandler');
+            wroteMediaPlaylist = true;
           }
-        } else {
+        } else if (!trimmedLine.startsWith('http') || !trimmedLine.contains('udux-nginx-vod-module')) {
           finalMasterManifestContent += line + '\n';
         }
       }
-      final String localMasterManifestFileName = p.basename(hlsUri.path);
+
+      if (!wroteMediaPlaylist) {
+        finalMasterManifestContent = '#EXTM3U\n#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=128003,CODECS="mp4a.40.2"\n${_proxyServer.getHlsManifestProxyUrl(trackId, localMediaPlaylistFileName)}\n';
+      }
+
+      final String localMasterManifestFileName = 'master.m3u8';
       final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
       await localMasterManifestFile.writeAsString(finalMasterManifestContent);
-      AppLogger.info('Rewritten HLS master manifest saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
-
-      //
-      // final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
-      // await localMasterManifestFile.writeAsString(finalMasterManifestContent);
       AppLogger.info('Rewritten master manifest saved: ${localMasterManifestFile.path}\nContent:\n$finalMasterManifestContent', name: 'HlsCacheHandler');
+
 
       return localMasterManifestFile.path;
     } catch (e, st) {
@@ -469,17 +491,235 @@ class HlsCacheHandler {
   }
 
   Uri _resolveUri(Uri baseUri, String relativePath) {
-    if (Uri.parse(relativePath).isAbsolute) {
-      return Uri.parse(relativePath);
-    }
-    return baseUri.resolve(relativePath);
+    final resolvedUri = baseUri.resolve(relativePath);
+    return Uri(
+      scheme: resolvedUri.scheme,
+      host: resolvedUri.host,
+      path: resolvedUri.path,
+    );
   }
 
-  Future<void> deleteCachedHls(String hlsLocalDirPath) async {
-    final Directory hlsDir = Directory(hlsLocalDirPath);
-    if (await hlsDir.exists()) {
-      AppLogger.info('Deleting HLS cache directory: ${hlsDir.path}', name: 'HlsCacheHandler');
-      await hlsDir.delete(recursive: true);
+  Future<int> _calculateDirSize(String dirPath) async {
+    int totalSize = 0;
+    final dir = Directory(dirPath);
+    if (await dir.exists()) {
+      await for (var entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          totalSize += await entity.length();
+        }
+      }
     }
+    return totalSize;
   }
 }
+
+// class HlsCacheHandler {
+//   static const int _maxSegmentRetries = 3;
+//   static const Duration _retryDelay = Duration(seconds: 2);
+//   final LocalProxyServer _proxyServer;
+//
+//   HlsCacheHandler({required LocalProxyServer proxyServer}) : _proxyServer = proxyServer;
+//
+//   Future<String?> cacheHls(
+//       String hlsUrl,
+//       String cacheBaseDirPath,
+//       String trackId, {
+//         Function(int received, int total)? onProgress,
+//         bool encrypt = false,
+//       }) async
+//   {
+//     AppLogger.info('Caching HLS: $hlsUrl for track $trackId', name: 'HlsCacheHandler');
+//     final Uri hlsUri = Uri.parse(hlsUrl);
+//     final String hlsCacheDirPath = p.join(cacheBaseDirPath, trackId);
+//     final Directory hlsCacheDir = Directory(hlsCacheDirPath);
+//
+//     try {
+//       if (!await hlsCacheDir.exists()) {
+//         await hlsCacheDir.create(recursive: true);
+//         AppLogger.info('Created HLS cache directory: ${hlsCacheDir.path}', name: 'HlsCacheHandler');
+//       }
+//
+//       // Download master manifest
+//       final http.Response masterManifestResponse = await http.get(hlsUri);
+//       if (masterManifestResponse.statusCode != 200) {
+//         AppLogger.error('Failed to download master manifest: ${masterManifestResponse.statusCode}', name: 'HlsCacheHandler');
+//         throw Exception('Failed to download master manifest');
+//       }
+//
+//       String masterManifestContent = masterManifestResponse.body;
+//       Uri baseUri = hlsUri;
+//
+//       // Validate master manifest
+//       if (!masterManifestContent.contains('#EXTM3U')) {
+//         AppLogger.error('Invalid master manifest: Missing #EXTM3U tag', name: 'HlsCacheHandler');
+//         throw Exception('Invalid master manifest');
+//       }
+//
+//       List<String> mediaPlaylistUrls = [];
+//       List<String> lines = masterManifestContent.split('\n');
+//       for (int i = 0; i < lines.length; i++) {
+//         String line = lines[i].trim();
+//         if (line.startsWith('#EXT-X-STREAM-INF')) {
+//           if (i + 1 < lines.length) {
+//             String uriLine = lines[i + 1].trim();
+//             if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
+//               mediaPlaylistUrls.add(uriLine);
+//             }
+//           }
+//         }
+//       }
+//
+//       if (mediaPlaylistUrls.isEmpty) {
+//         AppLogger.info('No #EXT-X-STREAM-INF found, assuming single media playlist', name: 'HlsCacheHandler');
+//         mediaPlaylistUrls.add(hlsUrl);
+//       }
+//
+//       String? selectedMediaPlaylistUrl = _resolveUri(baseUri, mediaPlaylistUrls.first).toString();
+//       AppLogger.info('Selected media playlist: $selectedMediaPlaylistUrl', name: 'HlsCacheHandler');
+//
+//       // Download media playlist
+//       final http.Response mediaPlaylistResponse = await http.get(Uri.parse(selectedMediaPlaylistUrl));
+//       if (mediaPlaylistResponse.statusCode != 200) {
+//         AppLogger.error('Failed to download media playlist: ${mediaPlaylistResponse.statusCode}', name: 'HlsCacheHandler');
+//         throw Exception('Failed to download media playlist');
+//       }
+//
+//       String mediaPlaylistContent = mediaPlaylistResponse.body;
+//       Uri mediaPlaylistBaseUri = Uri.parse(selectedMediaPlaylistUrl);
+//
+//       // Validate media playlist
+//       if (!mediaPlaylistContent.contains('#EXTM3U') || !mediaPlaylistContent.contains('#EXTINF')) {
+//         AppLogger.error('Invalid media playlist: Missing #EXTM3U or #EXTINF tags', name: 'HlsCacheHandler');
+//         throw Exception('Invalid media playlist format');
+//       }
+//
+//       List<String> segmentUrls = [];
+//       List<String> mediaPlaylistLines = mediaPlaylistContent.split('\n');
+//       for (String line in mediaPlaylistLines) {
+//         String trimmedLine = line.trim();
+//         if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+//           segmentUrls.add(_resolveUri(mediaPlaylistBaseUri, trimmedLine).toString());
+//         }
+//       }
+//
+//       int totalSegments = segmentUrls.length;
+//       int downloadedSegments = 0;
+//       if (onProgress != null) {
+//         onProgress(0, totalSegments);
+//       }
+//
+//       // Download segments
+//       for (String segmentUrl in segmentUrls) {
+//         int retries = 0;
+//         bool success = false;
+//         while (retries < _maxSegmentRetries && !success) {
+//           try {
+//             final Uri segmentUri = Uri.parse(segmentUrl);
+//             final String segmentFileName = p.basename(segmentUri.path);
+//             final String segmentPath = p.join(hlsCacheDirPath, segmentFileName);
+//             final File segmentFile = File(segmentPath);
+//
+//             final http.Response segmentResponse = await http.get(segmentUri);
+//             if (segmentResponse.statusCode != 200) {
+//               AppLogger.error('Failed to download segment $segmentUrl: ${segmentResponse.statusCode}', name: 'HlsCacheHandler');
+//               retries++;
+//               await Future.delayed(_retryDelay);
+//               continue;
+//             }
+//
+//             Uint8List segmentBytes = segmentResponse.bodyBytes;
+//             if (encrypt) {
+//               segmentBytes = AESHelper.encrypt(segmentBytes);
+//             }
+//             await segmentFile.writeAsBytes(segmentBytes);
+//             success = true;
+//             downloadedSegments++;
+//             if (onProgress != null) {
+//               onProgress(downloadedSegments, totalSegments);
+//             }
+//             AppLogger.info('Downloaded segment: $segmentFileName', name: 'HlsCacheHandler');
+//           } catch (e, st) {
+//             retries++;
+//             AppLogger.error('Error downloading segment $segmentUrl (retry $retries): $e', error: e, stackTrace: st, name: 'HlsCacheHandler');
+//             if (retries >= _maxSegmentRetries) {
+//               throw Exception('Failed to download segment after $retries retries');
+//             }
+//             await Future.delayed(_retryDelay);
+//           }
+//         }
+//       }
+//
+//       // Rewrite media playlist
+//       String finalMediaPlaylistContent = '';
+//       for (String line in mediaPlaylistLines) {
+//         String trimmedLine = line.trim();
+//         if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) {
+//           final String relativeSegmentPath = p.basename(trimmedLine);
+//           finalMediaPlaylistContent += '$relativeSegmentPath\n';
+//         } else {
+//           finalMediaPlaylistContent += '$line\n';
+//         }
+//       }
+//
+//       final String localMediaPlaylistFileName = p.basename(Uri.parse(selectedMediaPlaylistUrl).path);
+//       final File localMediaPlaylistFile = File(p.join(hlsCacheDirPath, localMediaPlaylistFileName));
+//       await localMediaPlaylistFile.writeAsString(finalMediaPlaylistContent);
+//       AppLogger.info('Rewritten media playlist saved: ${localMediaPlaylistFile.path}\nContent:\n$finalMediaPlaylistContent', name: 'HlsCacheHandler');
+//
+//       // Rewrite master manifest
+//       String finalMasterManifestContent = '';
+//       for (String line in masterManifestContent.split('\n')) {
+//         String trimmedLine = line.trim();
+//         if (trimmedLine.startsWith('#EXT-X-STREAM-INF')) {
+//           finalMasterManifestContent += line + '\n';
+//           int streamInfIndex = masterManifestContent.split('\n').indexOf(line);
+//           if (streamInfIndex + 1 < masterManifestContent.split('\n').length) {
+//             String uriLine = masterManifestContent.split('\n')[streamInfIndex + 1].trim();
+//             if (uriLine.isNotEmpty && !uriLine.startsWith('#')) {
+//               // Instead of using relative paths, use the proxy URL
+//               String localMediaPlaylistFileName = p.basename(Uri.parse(uriLine).path);
+//               String proxyMediaPlaylistUrl = _proxyServer.getHlsManifestProxyUrl(trackId, localMediaPlaylistFileName);
+//               finalMasterManifestContent += '$proxyMediaPlaylistUrl\n';
+//               AppLogger.info('Rewrote master manifest media playlist to proxy URL: $proxyMediaPlaylistUrl', name: 'HlsCacheHandler');
+//             }
+//           }
+//         } else {
+//           finalMasterManifestContent += line + '\n';
+//         }
+//       }
+//       final String localMasterManifestFileName = p.basename(hlsUri.path);
+//       final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
+//       await localMasterManifestFile.writeAsString(finalMasterManifestContent);
+//       AppLogger.info('Rewritten HLS master manifest saved to: ${localMasterManifestFile.path}', name: 'HlsCacheHandler');
+//
+//       //
+//       // final File localMasterManifestFile = File(p.join(hlsCacheDirPath, localMasterManifestFileName));
+//       // await localMasterManifestFile.writeAsString(finalMasterManifestContent);
+//       AppLogger.info('Rewritten master manifest saved: ${localMasterManifestFile.path}\nContent:\n$finalMasterManifestContent', name: 'HlsCacheHandler');
+//
+//       return localMasterManifestFile.path;
+//     } catch (e, st) {
+//       AppLogger.error('Error caching HLS stream $hlsUrl: $e', error: e, stackTrace: st, name: 'HlsCacheHandler');
+//       if (await hlsCacheDir.exists()) {
+//         await hlsCacheDir.delete(recursive: true);
+//       }
+//       return null;
+//     }
+//   }
+//
+//
+//   Uri _resolveUri(Uri baseUri, String relativePath) {
+//     if (Uri.parse(relativePath).isAbsolute) {
+//       return Uri.parse(relativePath);
+//     }
+//     return baseUri.resolve(relativePath);
+//   }
+//
+//   Future<void> deleteCachedHls(String hlsLocalDirPath) async {
+//     final Directory hlsDir = Directory(hlsLocalDirPath);
+//     if (await hlsDir.exists()) {
+//       AppLogger.info('Deleting HLS cache directory: ${hlsDir.path}', name: 'HlsCacheHandler');
+//       await hlsDir.delete(recursive: true);
+//     }
+//   }
+// }
