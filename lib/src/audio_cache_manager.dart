@@ -202,10 +202,22 @@ class AudioCacheManager {
           }
           return proxyUrl; // Serve the main manifest through the proxy
         } else if (entry.isHls) { // Unencrypted HLS: play directly from file
-          final String localManifestPath = entry.hlsManifestFilePath!;
+          final dir = Directory(entry.hlsLocalPath!);
+          if (!await dir.exists()) {
+            AppLogger.error('HLS cache directory missing: ${entry.hlsLocalPath}', name: 'AudioCacheManager');
+            return null;
+          }
+          final manifestFile = File(entry.hlsManifestFilePath!);
+          if (!await manifestFile.exists()) {
+            AppLogger.error('HLS manifest file missing: ${entry.hlsManifestFilePath}', name: 'AudioCacheManager');
+            return null;
+          }
+          final String localManifestPath = _proxyServer.getHlsManifestProxyUrl(trackId, p.basename(Uri.parse(entry.originalUrl).path));
           AppLogger.info('Returning HLS local manifest path (unencrypted): $localManifestPath', name: 'AudioCacheManager');
-          // return _proxyServer.getProxyUrl(trackId) ;
-          return 'file://$localManifestPath';
+          return localManifestPath;
+          // AppLogger.info('Returning HLS local manifest path (unencrypted): $localManifestPath', name: 'AudioCacheManager');
+          // // return _proxyServer.getProxyUrl(trackId) ;
+          // return 'file://$localManifestPath';
         }
         else {
           // Existing MP3 logic (also uses proxy for encrypted MP3s)
@@ -422,12 +434,31 @@ class AudioCacheManager {
     AppLogger.info('Cache cleanup complete. Current size: ${(currentTotalSize / (1024 * 1024)).toStringAsFixed(2)} MB', name: 'AudioCacheManager');
   }
 
+  // Future<String> _getCacheDirPath() async {
+  //   final Directory appDocDir = await getApplicationDocumentsDirectory();
+  //   final cacheDir = Directory(p.join(appDocDir.path, 'audio_cache'));
+  //
+  //   if (!await cacheDir.exists()) {
+  //     await cacheDir.create(recursive: true);
+  //   }
+  //   return cacheDir.path;
+  // }
+
   Future<String> _getCacheDirPath() async {
     final Directory appDocDir = await getApplicationDocumentsDirectory();
     final cacheDir = Directory(p.join(appDocDir.path, 'audio_cache'));
-
-    if (!await cacheDir.exists()) {
-      await cacheDir.create(recursive: true);
+    try {
+      if (!await cacheDir.exists()) {
+        await cacheDir.create(recursive: true);
+      }
+      // Test write permission
+      final testFile = File(p.join(cacheDir.path, 'test.txt'));
+      await testFile.writeAsString('test', flush: true);
+      await testFile.delete();
+      AppLogger.info('Cache directory access verified: ${cacheDir.path}', name: 'AudioCacheManager');
+    } catch (e, st) {
+      AppLogger.error('Failed to access cache directory: $e', error: e, stackTrace: st, name: 'AudioCacheManager');
+      throw Exception('Cache directory permission denied');
     }
     return cacheDir.path;
   }
