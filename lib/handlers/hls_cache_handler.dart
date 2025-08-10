@@ -266,7 +266,6 @@ import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
 //   }
 // }
 
-
 class HlsCacheHandler {
   static const int _maxSegmentRetries = 3;
   static const Duration _retryDelay = Duration(seconds: 2);
@@ -406,7 +405,24 @@ class HlsCacheHandler {
       String finalMediaPlaylistContent = '';
       for (String line in mediaPlaylistLines) {
         String trimmedLine = line.trim();
-        if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#') && !trimmedLine.startsWith('#EXT')) { // Ensure it's a URI and not an HLS tag
+        if (trimmedLine.startsWith('#EXTINF')) {
+          // Parse and normalize duration to integer if it's a float ending in .0
+          final parts = trimmedLine.split(':');
+          if (parts.length > 1) {
+            final durationStr = parts[1].split(',').first.trim();
+            double? duration = double.tryParse(durationStr);
+            if (duration != null) {
+              if (duration == duration.floorToDouble()) {
+                final int intDuration = duration.toInt();
+                final rebuiltLine = '${parts[0]}:$intDuration,${parts[1].split(',').skip(1).join(',')}';
+                finalMediaPlaylistContent += '$rebuiltLine\n';
+                AppLogger.info('Normalized #EXTINF duration from $durationStr to $intDuration for iOS compatibility', name: 'HlsCacheHandler');
+                continue;
+              }
+            }
+          }
+          finalMediaPlaylistContent += '$line\n'; // Keep as is if not normalizable
+        } else if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) { // Segment URI
           // This is a segment URI, replace with its local relative path
           final Uri segmentUri = _resolveUri(mediaPlaylistBaseUri, trimmedLine);
           // Get the path relative to the media playlist's base URI
@@ -414,15 +430,8 @@ class HlsCacheHandler {
               ? p.basename(segmentUri.path)
               : p.relative(segmentUri.path, from: mediaPlaylistBaseUri.path.substring(0, mediaPlaylistBaseUri.path.lastIndexOf('/') + 1));
 
-          if (Platform.isIOS) {
-            // Use absolute file:// URI for iOS to ensure AVPlayer resolves segments correctly
-            final String absoluteSegmentPath = Uri.file(p.join(hlsCacheDirPath, relativeSegmentPath)).toString();
-            finalMediaPlaylistContent += '$absoluteSegmentPath\n';
-            AppLogger.info('Rewrote media playlist segment line for iOS: $trimmedLine to $absoluteSegmentPath', name: 'HlsCacheHandler');
-          } else {
-            finalMediaPlaylistContent += '$relativeSegmentPath\n'; // Store local relative path for non-iOS
-            AppLogger.info('Rewrote media playlist segment line: $trimmedLine to $relativeSegmentPath', name: 'HlsCacheHandler');
-          }
+          finalMediaPlaylistContent += '$relativeSegmentPath\n'; // Store local relative path
+          AppLogger.info('Rewrote media playlist segment line: $trimmedLine to $relativeSegmentPath', name: 'HlsCacheHandler');
         } else {
           finalMediaPlaylistContent += '$line\n'; // Keep other lines as is
         }
@@ -454,15 +463,8 @@ class HlsCacheHandler {
               Uri resolvedUri = _resolveUri(baseUri, uriLine);
               // Get the path relative to the master manifest's location (which is hlsCacheDirPath)
               String relativePathToMediaPlaylist = p.relative(resolvedUri.path, from: baseUri.path.substring(0, baseUri.path.lastIndexOf('/') + 1));
-              if (Platform.isIOS) {
-                // Use absolute file:// URI for iOS
-                final String absoluteMediaPath = Uri.file(p.join(hlsCacheDirPath, relativePathToMediaPlaylist)).toString();
-                finalMasterManifestContent += '$absoluteMediaPath\n';
-                AppLogger.info('Rewrote master manifest media playlist line for iOS: $uriLine to $absoluteMediaPath', name: 'HlsCacheHandler');
-              } else {
-                finalMasterManifestContent += '$relativePathToMediaPlaylist\n'; // Store local relative path for non-iOS
-                AppLogger.info('Rewrote master manifest media playlist line: $uriLine to $relativePathToMediaPlaylist', name: 'HlsCacheHandler');
-              }
+              finalMasterManifestContent += '$relativePathToMediaPlaylist\n'; // Store local relative path
+              AppLogger.info('Rewrote master manifest media playlist line: $uriLine to $relativePathToMediaPlaylist', name: 'HlsCacheHandler');
             }
           }
         } else {
