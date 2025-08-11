@@ -52,15 +52,14 @@ class LocalProxyServer {
         // IMPORTANT FIX: Pass the correct proxySegmentRoute
         manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
 
-        return Response.ok(manifestContent, headers: {
+        // --- CRITICAL FIX START ---
+        // Convert the rewritten string to bytes to get the correct byte length for the header.
+        final manifestBytes = Uint8List.fromList(manifestContent.codeUnits);
+        // --- CRITICAL FIX END ---
 
-            // case '.m3u8':
-            // // use Apple's recommended type
-            // return 'application/vnd.apple.mpegurl';
-            // case '.ts':
-            // return 'video/mp2t';
+        return Response.ok(manifestBytes, headers: {
           'Content-Type': 'application/vnd.apple.mpegurl', // MIME type for M3U8
-          'Content-Length': manifestContent.length.toString(),
+          'Content-Length': manifestBytes.length.toString(),
           'Accept-Ranges': 'bytes',
         });
       } else {
@@ -176,11 +175,11 @@ class LocalProxyServer {
 
   // Helper method to rewrite HLS manifests to point to the proxy
   // This is a complex helper and will require careful implementation
-   String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_stream'}) {
+  String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_stream'}) {
     // Ensure the proxySegmentRoute starts with a '/'
-       if (!proxySegmentRoute.startsWith('/')) {
-         proxySegmentRoute = '/$proxySegmentRoute';
-       }
+    if (!proxySegmentRoute.startsWith('/')) {
+      proxySegmentRoute = '/$proxySegmentRoute';
+    }
     // This is a simplified example. Actual implementation needs robust parsing.
     // Use regex or a proper HLS manifest parser (if available)
     // to replace segment/sub-manifest paths with proxy URLs.
