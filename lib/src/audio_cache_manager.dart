@@ -191,7 +191,7 @@ class AudioCacheManager {
     try {
       if (entry.isHls) {
         // Always use proxy for HLS (encrypted or not) to ensure HTTP serving for AVPlayer compatibility
-        final proxyUrl = _proxyServer.getProxyUrl(trackId); // Generate proxy URL for the main track ID
+        final proxyUrl = _proxyServer.getHlsManifestProxyUrl(trackId, entry.hlsManifestFilePath!); // Generate proxy URL for the main track ID
         AppLogger.info('Returning PROXY URL for HLS (encrypted: ${entry.isEncrypted}): $trackId is $proxyUrl', name: 'AudioCacheManager');
         if (proxyUrl.isEmpty) {
           AppLogger.error('Proxy server not active for HLS playback.', name: 'AudioCacheManager');
