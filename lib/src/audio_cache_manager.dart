@@ -203,8 +203,10 @@ class AudioCacheManager {
           return proxyUrl; // Serve the main manifest through the proxy
         } else if (entry.isHls) { // Unencrypted HLS: play directly from file
           final String localManifestPath = entry.hlsManifestFilePath!;
+          final proxyUrl = _proxyServer.getProxyUrl(trackId);
+          final proxyHlsUrl = _proxyServer.getHlsManifestProxyUrl(trackId,'');
           AppLogger.info('Returning HLS local manifest path (unencrypted): $localManifestPath', name: 'AudioCacheManager');
-          return 'file://$localManifestPath';
+          return proxyUrl;
         }
         else {
           // Existing MP3 logic (also uses proxy for encrypted MP3s)
