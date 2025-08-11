@@ -53,7 +53,13 @@ class LocalProxyServer {
         manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
 
         return Response.ok(manifestContent, headers: {
-          'Content-Type': 'application/x-mpegURL', // MIME type for M3U8
+
+            // case '.m3u8':
+            // // use Apple's recommended type
+            // return 'application/vnd.apple.mpegurl';
+            // case '.ts':
+            // return 'video/mp2t';
+          'Content-Type': 'application/vnd.apple.mpegurl', // MIME type for M3U8
           'Content-Length': manifestContent.length.toString(),
           'Accept-Ranges': 'bytes',
         });
@@ -99,7 +105,8 @@ class LocalProxyServer {
 
       String contentType = 'application/octet-stream'; // Default
       if (path.endsWith('.m3u8')) {
-        contentType = 'application/x-mpegURL';
+        // contentType = 'application/x-mpegURL';
+        contentType = 'application/vnd.apple.mpegurl';
       } else if (path.endsWith('.ts')) {
         contentType = 'video/mp2t'; // MPEG-2 Transport Stream
       } // Add other content types as needed
