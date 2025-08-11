@@ -107,7 +107,7 @@ class AudioCacheManager {
         }
       }
 
-      proxyUrl = _proxyServer.getHlsManifestProxyUrl(trackId, p.basename(Uri.parse(originalUrl).path));
+      proxyUrl = await _proxyServer.getHlsManifestProxyUrl(trackId, p.basename(Uri.parse(originalUrl).path));
 
       AppLogger.info('Generated proxy URL for HLS for trackId: $trackId, isHls: $isHls, encrypt: $encrypt url: $proxyUrl,', name: 'AudioCacheManager');
       contentType = 'application/x-mpegURL';

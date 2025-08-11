@@ -162,28 +162,16 @@ class LocalProxyServer {
 
   /// Helper to get the full proxy URL for an HLS master manifest.
   /// This should be used when the master manifest URL is rewritten to point to the proxy.
-  Future<String> getHlsManifestProxyUrl(String trackId, String originalManifestFileName) async {
+  String getHlsManifestProxyUrl(String trackId, String originalManifestFileName) {
     if (_server == null || _port == 0) {
       AppLogger.warning('Proxy server not running. Cannot generate HLS manifest proxy URL.', name: 'LocalProxyServer');
       return ''; // Or throw an exception
     }
-
-    final File manifestFile = File(originalManifestFileName);
-    if (!await manifestFile.exists()) {
-    AppLogger.error('HLS master manifest not found: $originalManifestFileName', name: 'LocalProxyServer');
-    return '';
-    }
-
-    String manifestContent = await manifestFile.readAsString();
-    // IMPORTANT FIX: Pass the correct proxySegmentRoute
-    manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
-
     // The HLS manifest route should be designed to handle the manifest file name.
     // For this setup, we use the general audio route, but with the specific filename if needed for distinction
     // For now, it's served by the /audio/<trackId> route, and the HlsCacheHandler rewrites the inner manifest paths.
     // If you need a distinct proxy route for HLS manifests, you'd add another router.get.
-    return manifestContent;
-    // return 'http://$host:${_server!.port}/audio/$trackId';
+    return 'http://$host:${_server!.port}/audio/$trackId';
   }
 
   // Helper method to rewrite HLS manifests to point to the proxy
@@ -215,10 +203,11 @@ class LocalProxyServer {
       // So the path parameter in the route should be included in the local file path.
       // e.g., /hls_stream/trackId/variant/segment.ts
       final String resolvedPath = p.join(p.dirname(basePath), originalPath);
+      final String normalizedPath = p.normalize(resolvedPath);
 
       // Construct the new proxy URL for this specific segment or sub-manifest
-      final String fullProxyPath = 'http://127.0.0.1:$port$proxySegmentRoute/$trackId/$resolvedPath';
-      AppLogger.info('Rewriting HLS URL: $originalPath (resolved to $resolvedPath) to $fullProxyPath', name: 'HlsProxyRewrite');
+      final String fullProxyPath = 'http://127.0.0.1:$port$proxySegmentRoute/$trackId/$normalizedPath';
+      AppLogger.info('Rewriting HLS URL: $originalPath (resolved to $normalizedPath) to $fullProxyPath', name: 'HlsProxyRewrite');
       return fullProxyPath;
     });
   }
