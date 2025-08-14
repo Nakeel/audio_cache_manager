@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'dart:async';
 import 'package:audio_cache_manager/handlers/local_proxy_server.dart';
+import 'dart:convert';
 
 // class HlsCacheHandler {
 //   static const int _maxSegmentRetries = 3;
@@ -378,9 +379,12 @@ class HlsCacheHandler {
       for (String segmentUrl in segmentUrls) {
         AppLogger.info('Downloading segment: $segmentUrl', name: 'HlsCacheHandler');
         final Uri segmentUri = Uri.parse(segmentUrl);
-        final String segmentFileName = p.basename(segmentUri.path);
+        final String segmentExtension = p.extension(segmentUri.path);
+        final String segmentEncodedName = base64Url.encode(utf8.encode(segmentUri.toString()));
+        final String segmentFileName = '$segmentEncodedName$segmentExtension';
         final String segmentPath = p.join(hlsCacheDirPath, segmentFileName);
         final File segmentFile = File(segmentPath);
+
 
         final http.Response segmentResponse = await http.get(segmentUri);
         if (segmentResponse.statusCode != 200) {
@@ -423,12 +427,12 @@ class HlsCacheHandler {
           }
           finalMediaPlaylistContent += '$line\n'; // Keep as is if not normalizable
         } else if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) { // Segment URI
-          // This is a segment URI, replace with its local relative path
-          final Uri segmentUri = _resolveUri(mediaPlaylistBaseUri, trimmedLine);
-          // Get the path relative to the media playlist's base URI
-          final String relativeSegmentPath = mediaPlaylistBaseUri.path.isEmpty
-              ? p.basename(segmentUri.path)
-              : p.relative(segmentUri.path, from: mediaPlaylistBaseUri.path.substring(0, mediaPlaylistBaseUri.path.lastIndexOf('/') + 1));
+          // This is a segment URI, replace with its local relative path.
+          // We must use the same encoding logic as when saving the file.
+          final String segmentUrl = _resolveUri(mediaPlaylistBaseUri, trimmedLine).toString();
+          final String segmentExtension = p.extension(segmentUrl);
+          final String segmentEncodedName = base64Url.encode(utf8.encode(segmentUrl));
+          final String relativeSegmentPath = '$segmentEncodedName$segmentExtension';
 
           finalMediaPlaylistContent += '$relativeSegmentPath\n'; // Store local relative path
           AppLogger.info('Rewrote media playlist segment line: $trimmedLine to $relativeSegmentPath', name: 'HlsCacheHandler');

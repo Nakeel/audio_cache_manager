@@ -176,39 +176,31 @@ class LocalProxyServer {
 
   // Helper method to rewrite HLS manifests to point to the proxy
   // This is a complex helper and will require careful implementation
-   String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_stream'}) {
+  String _rewriteHlsManifest(String manifestContent, String trackId, int port, {String basePath = '', String proxySegmentRoute = '/hls_segments'}) {
     // Ensure the proxySegmentRoute starts with a '/'
-       if (!proxySegmentRoute.startsWith('/')) {
-         proxySegmentRoute = '/$proxySegmentRoute';
-       }
-    // This is a simplified example. Actual implementation needs robust parsing.
-    // Use regex or a proper HLS manifest parser (if available)
-    // to replace segment/sub-manifest paths with proxy URLs.
+    if (!proxySegmentRoute.startsWith('/')) {
+      proxySegmentRoute = '/$proxySegmentRoute';
+    }
 
-    // Example for a simple case, replacing .ts segments:
-    // #EXTINF:10.0,
-    // segment1.ts
-    // would become:
-    // #EXTINF:10.0,
-    // http://127.0.0.1:CURRENT_PORT/hls_stream/<trackId>/segment1.ts
+    final StringBuffer newManifestContent = StringBuffer();
+    final List<String> lines = manifestContent.split('\n');
+    final String proxyUrlBase = 'http://$host:$port$proxySegmentRoute/$trackId/';
 
-    final RegExp urlPattern = RegExp(r'^(?!#)(.*\.ts|.*\.m3u8)$', multiLine: true); // Matches lines that are not comments and end with .ts or .m3u8
-    return manifestContent.replaceAllMapped(urlPattern, (match) {
-      String originalPath = match.group(1)!;
-      // Resolve against original base URI from HlsCacheHandler if needed,
-      // but here we just need to ensure it's relative to the hlsLocalPath.
-      // And then turn it into a proxy URL.
+    for (final String line in lines) {
+      final String trimmedLine = line.trim();
+      if (trimmedLine.isEmpty || trimmedLine.startsWith('#')) {
+        // Keep HLS tags and comments as is
+        newManifestContent.writeln(line);
+      } else {
+        // This is a file path (segment or sub-manifest).
+        // Since we are using base64-encoded filenames in the cache,
+        // we can simply append the line itself to the proxy base URL.
+        newManifestContent.writeln(proxyUrlBase + trimmedLine);
+        AppLogger.info('Rewriting manifest URL: $trimmedLine to ${proxyUrlBase + trimmedLine}', name: 'HlsProxyRewrite');
+      }
+    }
 
-      // If it's a media playlist, the segments are relative to its own path.
-      // So the path parameter in the route should be included in the local file path.
-      // e.g., /hls_stream/trackId/variant/segment.ts
-      final String resolvedPath = p.join(p.dirname(basePath), originalPath);
-
-      // Construct the new proxy URL for this specific segment or sub-manifest
-      final String fullProxyPath = 'http://192.168.33.54:$port$proxySegmentRoute/$trackId/$resolvedPath';
-      AppLogger.info('Rewriting HLS URL: $originalPath (resolved to $resolvedPath) to $fullProxyPath', name: 'HlsProxyRewrite');
-      return fullProxyPath;
-    });
+    return newManifestContent.toString();
   }
 
 
