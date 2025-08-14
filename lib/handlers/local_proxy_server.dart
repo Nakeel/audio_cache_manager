@@ -32,13 +32,17 @@ class LocalProxyServer {
 
     // Existing route for MP3s and now the initial request for HLS
     _router.get('/audio/<trackId>', (Request request, String trackId) async {
-      final CacheEntry? entry = await metadataStore.get(trackId);
+      String _trackId = trackId;
+      if (trackId.contains(".")) {
+        _trackId = trackId.split(".")[0];
+      }
+      final CacheEntry? entry = await metadataStore.get(_trackId);
       if (entry == null) {
         return Response.notFound('Track not found');
       }
 
       // Clarified log message for master manifest serving
-      AppLogger.info('Serving HLS master manifest for track: $trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
+      AppLogger.info('Serving HLS master manifest for track: $_trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
 
       if (entry.isHls) {
         final String localManifestPath = entry.hlsManifestFilePath!;
@@ -50,7 +54,7 @@ class LocalProxyServer {
 
         String manifestContent = await manifestFile.readAsString();
         // IMPORTANT FIX: Pass the correct proxySegmentRoute
-        manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
+        manifestContent = _rewriteHlsManifest(manifestContent, _trackId, port, proxySegmentRoute: '/hls_segments');
 
         return Response.ok(manifestContent, headers: {
           'Content-Type': 'application/vnd.apple.mpegurl', // MIME type for M3U8
@@ -66,11 +70,11 @@ class LocalProxyServer {
         }
         Uint8List fileBytes = await cachedFile.readAsBytes();
         if (entry.isEncrypted) {
-          AppLogger.info('Proxy server decrypting content for $trackId', name: 'LocalProxyServer');
+          AppLogger.info('Proxy server decrypting content for $_trackId', name: 'LocalProxyServer');
           try {
             fileBytes = AESHelper.decrypt(fileBytes); // This is where the MP3 decrypt happens
           } catch (e, st) {
-            AppLogger.error('Error decrypting MP3 file $trackId from proxy: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
+            AppLogger.error('Error decrypting MP3 file $_trackId from proxy: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
             return Response.internalServerError(body: 'Error decrypting audio: $e');
           }
         }
