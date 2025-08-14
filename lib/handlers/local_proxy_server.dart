@@ -15,7 +15,7 @@ class LocalProxyServer {
   HttpServer? _server;
   final String cacheDirPath;
   final CacheMetadataStore metadataStore;
-  int _port = 0; // Will hold the dynamically assigned port
+  int _port = 9999; // Will hold the dynamically assigned port
 
   LocalProxyServer({required this.cacheDirPath, required this.metadataStore});
 
@@ -136,8 +136,8 @@ class LocalProxyServer {
 
     try {
       _server = await shelf_io.serve(_router, InternetAddress.loopbackIPv4, 0);
-      _port = _server!.port;
-      AppLogger.info('LocalProxyServer running on http://$host:${_server!.port}', name: 'LocalProxyServer');
+      // _port = _server!.port;
+      AppLogger.info('LocalProxyServer running on http://$host:${_port}', name: 'LocalProxyServer');
     } catch (e, st) {
       AppLogger.error('Failed to start LocalProxyServer: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
       _server = null;
@@ -150,7 +150,7 @@ class LocalProxyServer {
       AppLogger.warning('Proxy server not running. Cannot generate proxy URL.', name: 'LocalProxyServer');
       return ''; // Or throw an exception
     }
-    return 'http://$host:${_server!.port}/audio/$trackId';
+    return 'http://$host:${_port}/audio/$trackId';
   }
 
   /// Helper to get the full proxy URL for an HLS master manifest.
@@ -164,7 +164,7 @@ class LocalProxyServer {
     // For this setup, we use the general audio route, but with the specific filename if needed for distinction
     // For now, it's served by the /audio/<trackId> route, and the HlsCacheHandler rewrites the inner manifest paths.
     // If you need a distinct proxy route for HLS manifests, you'd add another router.get.
-    return 'http://$host:${_server!.port}/audio/$trackId';
+    return 'http://$host:${_port}/audio/$trackId';
   }
 
   // Helper method to rewrite HLS manifests to point to the proxy
