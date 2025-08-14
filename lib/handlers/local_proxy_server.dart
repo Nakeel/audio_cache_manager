@@ -20,7 +20,7 @@ class LocalProxyServer {
   LocalProxyServer({required this.cacheDirPath, required this.metadataStore});
 
   int get port => _port; // Expose the port for URI construction
-  String get host => _server?.address.host ?? '127.0.0.1'; // Expose the host
+  String get host => '192.168.33.62'; // Expose the host
 
   Future<void> start() async {
     if (_server != null) {
@@ -198,7 +198,7 @@ class LocalProxyServer {
       final String resolvedPath = p.join(p.dirname(basePath), originalPath);
 
       // Construct the new proxy URL for this specific segment or sub-manifest
-      final String fullProxyPath = 'http://127.0.0.1:$port$proxySegmentRoute/$trackId/$resolvedPath';
+      final String fullProxyPath = 'http://192.168.33.62:$port$proxySegmentRoute/$trackId/$resolvedPath';
       AppLogger.info('Rewriting HLS URL: $originalPath (resolved to $resolvedPath) to $fullProxyPath', name: 'HlsProxyRewrite');
       return fullProxyPath;
     });
