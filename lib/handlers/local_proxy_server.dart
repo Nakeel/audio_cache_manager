@@ -20,7 +20,7 @@ class LocalProxyServer {
   LocalProxyServer({required this.cacheDirPath, required this.metadataStore});
 
   int get port => _port; // Expose the port for URI construction
-  String get host => '192.168.33.54'; // Expose the host
+  String get host => '127.0.0.1'; // Expose the host
 
   Future<void> start() async {
     if (_server != null) {
