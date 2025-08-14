@@ -135,7 +135,7 @@ class LocalProxyServer {
 
 
     try {
-      _server = await shelf_io.serve(_router, InternetAddress.loopbackIPv4, 0);
+      _server = await shelf_io.serve(_router, host, _port);
       // _port = _server!.port;
       AppLogger.info('LocalProxyServer running on http://$host:${_port}', name: 'LocalProxyServer');
     } catch (e, st) {
