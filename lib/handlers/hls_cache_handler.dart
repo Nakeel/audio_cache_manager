@@ -379,9 +379,9 @@ class HlsCacheHandler {
       for (String segmentUrl in segmentUrls) {
         AppLogger.info('Downloading segment: $segmentUrl', name: 'HlsCacheHandler');
         final Uri segmentUri = Uri.parse(segmentUrl);
-        final String segmentExtension = p.extension(segmentUri.path);
-        final String segmentEncodedName = base64Url.encode(utf8.encode(segmentUri.toString()));
-        final String segmentFileName = '$segmentEncodedName$segmentExtension';
+
+        // This is the new naming convention
+        final String segmentFileName = '${trackId}_${p.basename(segmentUri.path)}';
         final String segmentPath = p.join(hlsCacheDirPath, segmentFileName);
         final File segmentFile = File(segmentPath);
 
@@ -427,12 +427,8 @@ class HlsCacheHandler {
           }
           finalMediaPlaylistContent += '$line\n'; // Keep as is if not normalizable
         } else if (trimmedLine.isNotEmpty && !trimmedLine.startsWith('#')) { // Segment URI
-          // This is a segment URI, replace with its local relative path.
-          // We must use the same encoding logic as when saving the file.
-          final String segmentUrl = _resolveUri(mediaPlaylistBaseUri, trimmedLine).toString();
-          final String segmentExtension = p.extension(segmentUrl);
-          final String segmentEncodedName = base64Url.encode(utf8.encode(segmentUrl));
-          final String relativeSegmentPath = '$segmentEncodedName$segmentExtension';
+          final Uri segmentUri = _resolveUri(mediaPlaylistBaseUri, trimmedLine);
+          final String relativeSegmentPath = '${trackId}_${p.basename(segmentUri.path)}';
 
           finalMediaPlaylistContent += '$relativeSegmentPath\n'; // Store local relative path
           AppLogger.info('Rewrote media playlist segment line: $trimmedLine to $relativeSegmentPath', name: 'HlsCacheHandler');
