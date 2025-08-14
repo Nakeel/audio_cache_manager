@@ -53,7 +53,7 @@ class LocalProxyServer {
         manifestContent = _rewriteHlsManifest(manifestContent, trackId, port, proxySegmentRoute: '/hls_segments');
 
         return Response.ok(manifestContent, headers: {
-          'Content-Type': 'application/x-mpegURL', // MIME type for M3U8
+          'Content-Type': 'application/vnd.apple.mpegurl', // MIME type for M3U8
           'Content-Length': manifestContent.length.toString(),
           'Accept-Ranges': 'bytes',
         });
@@ -75,7 +75,9 @@ class LocalProxyServer {
           }
         }
         return Response.ok(fileBytes, headers: {
-          'Content-Type': entry.contentType,
+          // 'Content-Type': entry.contentType,
+
+          'Content-Type': 'application/vnd.apple.mpegurl',
           'Content-Length': fileBytes.length.toString(),
           'Accept-Ranges': 'bytes',
         });
@@ -127,7 +129,8 @@ class LocalProxyServer {
       }
 
       return Response.ok(fileBytes, headers: {
-        'Content-Type': contentType,
+        // 'Content-Type': contentType,
+        'Content-Type': 'application/vnd.apple.mpegurl',
         'Content-Length': fileBytes.length.toString(),
         'Accept-Ranges': 'bytes',
       });
