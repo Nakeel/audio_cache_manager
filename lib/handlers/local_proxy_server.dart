@@ -198,7 +198,7 @@ class LocalProxyServer {
       final String resolvedPath = p.join(p.dirname(basePath), originalPath);
 
       // Construct the new proxy URL for this specific segment or sub-manifest
-      final String fullProxyPath = 'http://192.168.33.62:$port$proxySegmentRoute/$trackId/$resolvedPath';
+      final String fullProxyPath = 'http://192.168.33.54:$port$proxySegmentRoute/$trackId/$resolvedPath';
       AppLogger.info('Rewriting HLS URL: $originalPath (resolved to $resolvedPath) to $fullProxyPath', name: 'HlsProxyRewrite');
       return fullProxyPath;
     });
