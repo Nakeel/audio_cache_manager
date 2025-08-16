@@ -54,7 +54,7 @@ class LocalProxyServer {
 
         String manifestContent = await manifestFile.readAsString();
         // IMPORTANT FIX: Pass the correct proxySegmentRoute
-        manifestContent = _rewriteHlsManifest(manifestContent, _trackId, port, proxySegmentRoute: '/hls_segments');
+        manifestContent = _rewriteHlsManifest(manifestContent, _trackId, _server!.port, proxySegmentRoute: '/hls_segments');
 
         return Response.ok(manifestContent, headers: {
           'Content-Type': 'application/vnd.apple.mpegurl', // MIME type for M3U8
@@ -119,7 +119,7 @@ class LocalProxyServer {
           // This is a media playlist. Rewrite its segment URLs to proxy.
           String manifestContent = String.fromCharCodes(fileBytes);
           // Correctly passing proxySegmentRoute to rewrite sub-manifests
-          manifestContent = _rewriteHlsManifest(manifestContent, trackId, _port, basePath: path, proxySegmentRoute: '/hls_segments');
+          manifestContent = _rewriteHlsManifest(manifestContent, trackId, _server!.port, basePath: path, proxySegmentRoute: '/hls_segments');
           fileBytes = Uint8List.fromList(manifestContent.codeUnits);
         } else if (path.endsWith('.ts')) { // Assuming segments are .ts and are encrypted
           AppLogger.info('Proxy server decrypting HLS segment: $path for track $trackId', name: 'LocalProxyServer');
@@ -143,7 +143,7 @@ class LocalProxyServer {
 
     try {
       _server = await shelf_io.serve(_router, host, _port);
-      // _port = _server!.port;
+      _port = _server!.port;
       AppLogger.info('LocalProxyServer running on http://$host:${_port}', name: 'LocalProxyServer');
     } catch (e, st) {
       AppLogger.error('Failed to start LocalProxyServer: $e', error: e, stackTrace: st, name: 'LocalProxyServer');
@@ -157,7 +157,7 @@ class LocalProxyServer {
       AppLogger.warning('Proxy server not running. Cannot generate proxy URL.', name: 'LocalProxyServer');
       return ''; // Or throw an exception
     }
-    return 'http://$host:${_port}/audio/$trackId';
+    return 'http://$host:${_server!.port}/audio/$trackId';
   }
 
   /// Helper to get the full proxy URL for an HLS master manifest.
@@ -171,7 +171,7 @@ class LocalProxyServer {
     // For this setup, we use the general audio route, but with the specific filename if needed for distinction
     // For now, it's served by the /audio/<trackId> route, and the HlsCacheHandler rewrites the inner manifest paths.
     // If you need a distinct proxy route for HLS manifests, you'd add another router.get.
-    return 'http://$host:${_port}/audio/$trackId';
+    return 'http://$host:${_server!.port}/audio/$trackId';
   }
 
   // Helper method to rewrite HLS manifests to point to the proxy
