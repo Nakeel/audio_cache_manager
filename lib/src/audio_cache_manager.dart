@@ -244,8 +244,10 @@ class AudioCacheManager {
     }
     final CacheEntry? entry = await _metadataStore.get(trackId);
     if (entry == null) {
+      AppLogger.error('Audio is not cached', name: 'AudioCacheManager');
       return false;
     }
+    AppLogger.error('Audio exist: ${entry.cacheFileEntity.existsSync()}', name: 'AudioCacheManager');
     return entry.cacheFileEntity.existsSync();
   }
 
