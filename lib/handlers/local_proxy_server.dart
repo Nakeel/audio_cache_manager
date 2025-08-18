@@ -15,12 +15,16 @@ class LocalProxyServer {
   HttpServer? _server;
   final String cacheDirPath;
   final CacheMetadataStore metadataStore;
-  int _port = 9999; // Will hold the dynamically assigned port
+  int _port = 0; // Will hold the dynamically assigned port
 
   LocalProxyServer({required this.cacheDirPath, required this.metadataStore});
 
   int get port => _port; // Expose the port for URI construction
   String get host => '127.0.0.1'; // Expose the host
+
+  String _reconstructFullPath(String relativePath) {
+    return p.join(cacheDirPath, relativePath);
+  }
 
   Future<void> start() async {
     if (_server != null) {
@@ -45,7 +49,7 @@ class LocalProxyServer {
       AppLogger.info('Serving HLS master manifest for track: $_trackId, isEncrypted: ${entry.isEncrypted}', name: 'LocalProxyServer');
 
       if (entry.isHls) {
-        final String localManifestPath = entry.hlsManifestFilePath!;
+        final String localManifestPath = _reconstructFullPath(entry.hlsManifestFilePath!);
         final File manifestFile = File(localManifestPath);
         if (!await manifestFile.exists()) {
           AppLogger.error('HLS master manifest not found: $localManifestPath', name: 'LocalProxyServer');
@@ -63,7 +67,8 @@ class LocalProxyServer {
         });
       } else {
         // --- EXISTING MP3 LOGIC ---
-        final File cachedFile = File(entry.filePath);
+        final String fullFilePath = _reconstructFullPath(entry.filePath);
+        final File cachedFile = File(fullFilePath);
         if (!await cachedFile.exists()) {
           AppLogger.error('Cached file not found for MP3 track: ${entry.filePath}', name: 'LocalProxyServer');
           return Response.notFound('Cached file not found.');
@@ -95,7 +100,11 @@ class LocalProxyServer {
         return Response.notFound('HLS track not found or not an HLS entry.');
       }
 
-      final String fullLocalPath = p.join(entry.hlsLocalPath!, path);
+      // The `hlsLocalPath` is the relative directory (e.g., 'trackId').
+      // Join it with the segment/sub-manifest path to get the full relative path.
+      final String relativeFilePath = p.join(entry.hlsLocalPath!, path);
+      // Now reconstruct the absolute path for file access.
+      final String fullLocalPath = _reconstructFullPath(relativeFilePath);
       final File hlsFile = File(fullLocalPath);
 
       if (!await hlsFile.exists()) {
@@ -142,7 +151,7 @@ class LocalProxyServer {
 
 
     try {
-      _server = await shelf_io.serve(_router, host, _port);
+      _server = await shelf_io.serve(_router, InternetAddress.loopbackIPv4, 0);
       _port = _server!.port;
       AppLogger.info('LocalProxyServer running on http://$host:${_port}', name: 'LocalProxyServer');
     } catch (e, st) {
