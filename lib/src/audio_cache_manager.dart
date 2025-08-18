@@ -51,6 +51,10 @@ class AudioCacheManager {
     AppLogger.info('AudioCacheManager initialized. Cache directory: $_cacheDirPath', name: 'AudioCacheManager');
   }
 
+  String _reconstructFullPath(String relativePath) {
+    return p.join(_cacheDirPath, relativePath);
+  }
+
   /// Caches an audio file (MP3 or HLS).
   /// Returns the local path or proxy URL to the cached file for playback.
   Future<String?> cacheAudio({
@@ -67,7 +71,11 @@ class AudioCacheManager {
 
     final CacheEntry? existingEntry = await _metadataStore.get(trackId);
     if (existingEntry != null && existingEntry.originalUrl == originalUrl) {
-      if (existingEntry.cacheFileEntity.existsSync()) {
+      final entityToCheck = existingEntry.isHls
+          ? Directory(_reconstructFullPath(existingEntry.hlsLocalPath!))
+          : File(_reconstructFullPath(existingEntry.filePath));
+
+      if (await entityToCheck.exists()) {
         AppLogger.info('Audio $trackId already cached and exists on disk. Returning existing path.', name: 'AudioCacheManager');
         return getPlaybackUrl(trackId);
       } else {
@@ -96,9 +104,12 @@ class AudioCacheManager {
         AppLogger.error('Failed to cache HLS for track $trackId.', name: 'AudioCacheManager');
         return null;
       }
+      final String relativeHlsPath = trackId;
+      final String fullHlsTrackPath = _reconstructFullPath(relativeHlsPath);
+
 
       int hlsTotalSize = 0;
-      final Directory hlsTrackDir = Directory(p.join(_cacheDirPath, trackId));
+      final Directory hlsTrackDir = Directory(fullHlsTrackPath);
       if (await hlsTrackDir.exists()) {
         await for (var entity in hlsTrackDir.list(recursive: true, followLinks: false)) {
           if (entity is File) {
@@ -108,22 +119,26 @@ class AudioCacheManager {
       }
 
       proxyUrl = _proxyServer.getHlsManifestProxyUrl(trackId, p.basename(Uri.parse(originalUrl).path));
+
+      AppLogger.info('Generated proxy URL for HLS for trackId: $trackId, isHls: $isHls, encrypt: $encrypt url: $proxyUrl,', name: 'AudioCacheManager');
       contentType = 'application/x-mpegURL';
 
       final newEntry = CacheEntry(
         trackId: trackId,
         originalUrl: originalUrl,
-        filePath: '', // HLS doesn't have a single file path in this context
+        filePath: '', // Not used for HLS
         timestamp: DateTime.now(),
         fileSize: hlsTotalSize,
-        isEncrypted: encrypt, // HLS segments are decrypted on cache, but manifest might be served by proxy
+        isEncrypted: encrypt,
         etag: '',
         lastModified: '',
         contentType: contentType,
         proxyUrl: proxyUrl,
         isHls: true,
-        hlsLocalPath: hlsTrackDir.path,
-        hlsManifestFilePath: hlsLocalMasterManifestPath,
+        // Store the directory name ('trackId') as the relative path
+        hlsLocalPath: relativeHlsPath,
+        // Store the manifest path relative to the base cache directory
+        hlsManifestFilePath: p.relative(hlsLocalMasterManifestPath, from: _cacheDirPath),
       );
       await _metadataStore.save(newEntry);
       return proxyUrl;
@@ -154,14 +169,14 @@ class AudioCacheManager {
       final newEntry = CacheEntry(
         trackId: trackId,
         originalUrl: originalUrl,
-        filePath: localPath,
+        filePath: p.relative(localPath, from: _cacheDirPath), // Store relative path
         timestamp: DateTime.now(),
         fileSize: fileSize,
         isEncrypted: encrypt,
         etag: '',
         lastModified: '',
         contentType: contentType,
-        proxyUrl: proxyUrl, // This will be set for encrypted MP3s to force proxy playback
+        proxyUrl: proxyUrl,
         isHls: false,
         hlsLocalPath: null,
         hlsManifestFilePath: null,
@@ -200,13 +215,18 @@ class AudioCacheManager {
           }
           return proxyUrl; // Serve the main manifest through the proxy
         } else if (entry.isHls) { // Unencrypted HLS: play directly from file
-          final String localManifestPath = entry.hlsManifestFilePath!;
+          final String localManifestPath = _reconstructFullPath(entry.hlsManifestFilePath!);
+
+          final proxyUrl = _proxyServer.getProxyUrl(trackId);
+          final proxyHlsUrl = _proxyServer.getHlsManifestProxyUrl(trackId,'');
           AppLogger.info('Returning HLS local manifest path (unencrypted): $localManifestPath', name: 'AudioCacheManager');
-          return 'file://$localManifestPath';
+          return proxyUrl;
         }
         else {
           // Existing MP3 logic (also uses proxy for encrypted MP3s)
-          final File cachedFile = File(entry.filePath);
+
+          final String fullFilePath = _reconstructFullPath(entry.filePath);
+          final File cachedFile = File(fullFilePath);
           if (await cachedFile.exists()) {
             if (entry.isEncrypted) {
               final proxyUrl = _proxyServer.getProxyUrl(trackId);
@@ -221,7 +241,9 @@ class AudioCacheManager {
               return 'file://${cachedFile.path}';
             }
           } else {
-            AppLogger.warning('Cached file not found for trackId: $trackId at ${entry.filePath}', name: 'AudioCacheManager');
+
+            AppLogger.warning('Cached file not found for trackId: $trackId at $fullFilePath', name: 'AudioCacheManager');
+            // AppLogger.warning('Cached file not found for trackId: $trackId at ${entry.filePath}', name: 'AudioCacheManager');
             return null;
           }
         }
@@ -240,9 +262,21 @@ class AudioCacheManager {
     }
     final CacheEntry? entry = await _metadataStore.get(trackId);
     if (entry == null) {
+      AppLogger.error('Audio is not cached', name: 'AudioCacheManager');
       return false;
     }
-    return entry.cacheFileEntity.existsSync();
+    if (entry.isHls) {
+      if (entry.hlsLocalPath == null) return false;
+      final Directory hlsDir = Directory(_reconstructFullPath(entry.hlsLocalPath!));
+      final isExist = await hlsDir.exists();
+      AppLogger.error('Audio exist: ${isExist}', name: 'AudioCacheManager');
+      return isExist;
+    } else {
+      final File file = File(_reconstructFullPath(entry.filePath));
+      final isExist = await file.exists();
+      AppLogger.error('Audio exist: ${isExist}', name: 'AudioCacheManager');
+      return  isExist;
+    }
   }
 
   /// Deletes a cached audio file.
@@ -255,21 +289,24 @@ class AudioCacheManager {
     if (entry != null) {
       AppLogger.info('Attempting to delete cache for $trackId', name: 'AudioCacheManager');
       try {
-        if (entry.isHls) {
-          final Directory hlsDir = Directory(entry.hlsLocalPath!);
-          if (await hlsDir.exists()) {
-            await hlsDir.delete(recursive: true);
-            AppLogger.info('Deleted HLS cache directory: ${hlsDir.path}', name: 'AudioCacheManager');
+          // > MODIFICATION START
+          // Reconstruct paths before attempting to delete files or directories.
+          if (entry.isHls) {
+            final Directory hlsDir = Directory(_reconstructFullPath(entry.hlsLocalPath!));
+            if (await hlsDir.exists()) {
+              await hlsDir.delete(recursive: true);
+              AppLogger.info('Deleted HLS cache directory: ${hlsDir.path}', name: 'AudioCacheManager');
+            }
+          } else {
+            final File file = File(_reconstructFullPath(entry.filePath));
+            if (await file.exists()) {
+              await file.delete();
+              AppLogger.info('Deleted MP3 cache file: ${file.path}', name: 'AudioCacheManager');
+            }
           }
-        } else {
-          final File file = File(entry.filePath);
-          if (await file.exists()) {
-            await file.delete();
-            AppLogger.info('Deleted MP3 cache file: ${file.path}', name: 'AudioCacheManager');
-          }
-        }
-        await _metadataStore.delete(trackId);
-        AppLogger.info('Successfully deleted cache entry for $trackId.', name: 'AudioCacheManager');
+          // > MODIFICATION END
+          await _metadataStore.delete(trackId);
+          AppLogger.info('Successfully deleted cache entry for $trackId.', name: 'AudioCacheManager');
       } catch (e, st) {
         AppLogger.error('Error deleting cache for $trackId: $e', error: e, stackTrace: st, name: 'AudioCacheManager');
       }
@@ -355,7 +392,8 @@ class AudioCacheManager {
       if (now.difference(entry.timestamp) > _expirationDuration) {
         AppLogger.info('Deleting expired entry: ${entry.trackId}', name: 'AudioCacheManager');
         if (entry.isHls && entry.hlsLocalPath != null) {
-          final Directory hlsDir = Directory(entry.hlsLocalPath!);
+          // final Directory hlsDir = Directory(entry.hlsLocalPath!);
+          final Directory hlsDir = Directory(_reconstructFullPath(entry.hlsLocalPath!));
           if (await hlsDir.exists()) {
             int hlsDeletedSize = 0;
             await for (var entity in hlsDir.list(recursive: true, followLinks: false)) {
@@ -369,7 +407,7 @@ class AudioCacheManager {
             currentTotalSize -= entry.fileSize;
           }
         } else {
-          final File file = File(entry.filePath);
+          final File file = File(_reconstructFullPath(entry.filePath));
           if (await file.exists()) {
             await file.delete();
             currentTotalSize -= entry.fileSize;
